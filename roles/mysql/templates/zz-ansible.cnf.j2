@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+[mysqld]
+bind-address = {{ mysql_bind_address }}
+port = {{ mysql_port }}
+{% if mysql_enable_native_password | bool %}
+# community.mysql's password management hardcodes mysql_native_password for
+# MySQL >= 8 (module_utils/user.py), but MySQL 8.4 ships that plugin disabled
+# by default. Re-enable it for the Ansible-managed users; remove once the
+# collection stops hardcoding it (mysql_native_password is gone in MySQL 9.x).
+mysql_native_password = ON
+{% endif %}
+{% if mysql_test_throughput | bool %}
+# Durability-vs-throughput for the throwaway inttest datastore: commit
+# redos/binlog flushes every ~1s instead of per-commit, cutting first-boot
+# schema initialization from minutes to seconds. Full durability is the prod
+# concern and prod does not use this role.
+innodb_flush_log_at_trx_commit = 2
+sync_binlog = 0
+{% endif %}

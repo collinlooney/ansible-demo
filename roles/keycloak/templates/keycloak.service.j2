@@ -1,0 +1,17 @@
+[Unit]
+Description=Keycloak {{ keycloak_version }} (identity provider)
+After={{ keycloak_after_units }}
+
+[Service]
+Type=simple
+User={{ keycloak_user }}
+Group={{ keycloak_group }}
+EnvironmentFile=/etc/keycloak.env
+ExecStart={{ keycloak_install_dir }}/bin/kc.sh start --optimized --import-realm
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=600
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,47 @@
+---
+- name: Install MySQL server and Python driver
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+      - python3-pymysql
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Enable and start MySQL
+  ansible.builtin.systemd:
+    name: mysql
+    enabled: true
+    state: started
+
+- name: Render connection settings drop-in
+  ansible.builtin.template:
+    src: zz-ansible.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/zz-ansible.cnf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart mysql
+
+- name: Apply settings before provisioning
+  ansible.builtin.meta: flush_handlers
+
+- name: Create databases
+  community.mysql.mysql_db:
+    name: "{{ item.name }}"
+    encoding: "{{ item.encoding | default('utf8mb4') }}"
+    collation: "{{ item.collation | default('utf8mb4_0900_ai_ci') }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  loop: "{{ mysql_databases }}"
+
+- name: Create database users
+  community.mysql.mysql_user:
+    name: "{{ item.name }}"
+    host: "{{ item.host }}"
+    password: "{{ item.password }}"
+    priv: "{{ item.priv }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  loop: "{{ mysql_users }}"
+  no_log: true

@@ -1,0 +1,43 @@
+{
+  "realm": "{{ keycloak_realm }}",
+  "enabled": true,
+  "sslRequired": "{{ keycloak_ssl_required }}",
+  "registrationAllowed": {{ 'true' if keycloak_registration_allowed | bool else 'false' }},
+  "resetPasswordAllowed": true,
+  "bruteForceProtected": true,
+  "groups": [
+    { "name": "super-admins" },
+    { "name": "admins" },
+    { "name": "approvers" },
+    { "name": "customers" },
+    { "name": "pending-approval" }
+  ],
+  "clients": [
+    {
+      "clientId": "web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["/*"],
+      "webOrigins": ["/*"],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": false,
+            "multivalued": true,
+            "access.token.claim": true,
+            "id.token.claim": true,
+            "userinfo.token.claim": true
+          }
+        }
+      ]
+    }
+  ]
+}

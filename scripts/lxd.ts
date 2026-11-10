@@ -93,7 +93,11 @@ export function waitForSsh(ip: string, privateKeyPath: string): void {
 }
 
 export function readContainerLogs(name: string): string {
-  const res = execFileSync('lxc', ['exec', name, '--', 'journalctl', '-u', 'node-express-app', '-n', '200', '--no-pager'], { timeout: 60000 });
+  const res = execFileSync(
+    'lxc',
+    ['exec', name, '--', 'journalctl', '-u', 'node-express-app', '-u', 'keycloak', '-u', 'mysql', '-n', '400', '--no-pager'],
+    { timeout: 60000 },
+  );
   return `${res.stdout}\n${res.stderr}`;
 }
 

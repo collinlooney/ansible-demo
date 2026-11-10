@@ -1,0 +1,14 @@
+---
+# Generic MySQL server provisioning. Used only by integration tests today;
+# production Keycloak reuses the existing prod MySQL instance.
+mysql_bind_address: 127.0.0.1
+mysql_port: 3306
+# See roles/mysql/templates/zz-ansible.cnf.j2 — required by community.mysql's
+# password handling on MySQL 8.4 (plugin disabled by default there).
+mysql_enable_native_password: true
+# Throwaway inttest datastore: relax per-commit fsync so first-boot schema
+# initialization (Liquibase, ~1 DDL/s when fsync-bound) finishes in seconds.
+# Prod never uses this role (Keycloak reuses the existing shared MySQL).
+mysql_test_throughput: true
+mysql_databases: []
+mysql_users: []

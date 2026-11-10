@@ -8,3 +8,7 @@
     - role: node_runtime
       when: app_backend | default('native') == 'native'
     - role: node_express_app
+    - role: mysql
+      when: mysql_enabled | default(false) | bool
+    - role: keycloak
+      when: keycloak_enabled | default(false) | bool

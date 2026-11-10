@@ -1,0 +1,135 @@
+---
+- name: Install OpenJDK 21 runtime
+  ansible.builtin.apt:
+    name: openjdk-21-jre-headless
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Ensure Keycloak group exists
+  ansible.builtin.group:
+    name: "{{ keycloak_group }}"
+    state: present
+    system: true
+
+- name: Ensure Keycloak user exists
+  ansible.builtin.user:
+    name: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+    home: "{{ keycloak_install_dir }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Create install directory
+  ansible.builtin.file:
+    path: "{{ keycloak_install_dir }}"
+    state: directory
+    owner: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+    mode: '0755'
+
+- name: Download Keycloak tarball
+  ansible.builtin.get_url:
+    url: "{{ keycloak_download_url }}"
+    dest: "/opt/keycloak-{{ keycloak_version }}.tar.gz"
+    checksum: "sha1:{{ keycloak_sha1 }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Unpack Keycloak distribution
+  ansible.builtin.unarchive:
+    src: "/opt/keycloak-{{ keycloak_version }}.tar.gz"
+    dest: "{{ keycloak_install_dir }}"
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+    owner: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+  notify: Restart keycloak
+
+- name: Create providers directory
+  ansible.builtin.file:
+    path: "{{ keycloak_install_dir }}/providers"
+    state: directory
+    owner: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+    mode: '0755'
+
+- name: Download bcrypt password SPI jar
+  ansible.builtin.get_url:
+    url: "{{ keycloak_bcrypt_jar_url }}"
+    dest: "{{ keycloak_install_dir }}/providers/keycloak-bcrypt-1.7.0.jar"
+    checksum: "sha256:{{ keycloak_bcrypt_jar_sha256 }}"
+    owner: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+    mode: '0644'
+  notify: Restart keycloak
+
+- name: Render environment file
+  ansible.builtin.template:
+    src: keycloak.env.j2
+    dest: /etc/keycloak.env
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Restart keycloak
+
+- name: Create realm import directory
+  ansible.builtin.file:
+    path: "{{ keycloak_install_dir }}/data/import"
+    state: directory
+    owner: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+    mode: '0755'
+
+- name: Render realm configuration
+  ansible.builtin.template:
+    src: realm.json.j2
+    dest: "{{ keycloak_install_dir }}/data/import/realm.json"
+    owner: "{{ keycloak_user }}"
+    group: "{{ keycloak_group }}"
+    mode: '0640'
+  notify: Restart keycloak
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: keycloak.service.j2
+    dest: /etc/systemd/system/keycloak.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload systemd
+    - Restart keycloak
+
+- name: Build optimized server image
+  # Documented production posture: build at deploy, start with --optimized so
+  # boot never runs a build (downtime budget belongs to boot, not compilation).
+  ansible.builtin.command:
+    cmd: bin/kc.sh build
+    chdir: "{{ keycloak_install_dir }}"
+  become: true
+  become_user: "{{ keycloak_user }}"
+  environment:
+    HOME: "{{ keycloak_install_dir }}"
+    KC_DB: mysql
+    KC_DB_URL: "jdbc:mysql://{{ keycloak_db_host }}:{{ keycloak_db_port }}/{{ keycloak_db_name }}?useSSL=false&allowPublicKeyRetrieval=true"
+    KC_DB_USERNAME: "{{ keycloak_db_username }}"
+    KC_DB_PASSWORD: "{{ keycloak_db_password }}"
+    KC_HTTP_ENABLED: 'true'
+    KC_HOSTNAME_STRICT: "{{ 'true' if keycloak_hostname_strict | bool else 'false' }}"
+    KC_HEALTH_ENABLED: 'true'
+  changed_when: true
+  notify: Restart keycloak
+
+- name: Apply pending restarts before enabling (single clean boot)
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Keycloak
+  ansible.builtin.systemd:
+    name: keycloak
+    enabled: true
+    state: started
+    daemon_reload: true

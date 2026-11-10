@@ -33,7 +33,7 @@ jobs:
   integration:
     needs: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Setup LXD
@@ -58,5 +58,7 @@ jobs:
             name=$(lxc list --format csv 2>/dev/null | grep node-express-inttest | cut -d, -f1 | head -1)
             echo "Container logs for $name:"
             lxc exec "$name" -- journalctl -u node-express-app -n 200 --no-pager || true
+            lxc exec "$name" -- journalctl -u keycloak -n 400 --no-pager || true
+            lxc exec "$name" -- journalctl -u mysql -n 200 --no-pager || true
             lxc delete "$name" --force || true
           fi

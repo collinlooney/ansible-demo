@@ -1,10 +1,12 @@
 # Plan: Scope Reduction via Reputable OSS (Bare-Metal, Ansible-Managed)
 
-Status: proposal, rev 3 — IdP selection revisited (registration requirement);
-audit-durability claims validated per component. Revised after reviewing the
-authorized DB dump (`~/backups/mysql-all-20261027-121001.sql.gz`) and the Admin
-auth/audit code. Versions and distribution channels verified against official
-sources on 2026-11-09 (links inline).
+Status: proposal, rev 4 — IdP-first milestone pulled ahead; Keycloak datastore
+swapped to MySQL (production reuses the existing shared instance); bcrypt import
+format verified against the SPI source. Rev 3 selected Keycloak; rev 2 was the
+IdP rescope. Audit-durability claims validated per component. Revised after
+reviewing the authorized DB dump (`~/backups/mysql-all-20261027-121001.sql.gz`)
+and the Admin auth/audit code. Versions and distribution channels verified
+against official sources on 2026-11-09/10 (links inline).
 
 ## 1. Goals and constraints
 
@@ -29,7 +31,7 @@ Software being added:
 | Concern            | Replaces (in ~/Documents/Code/Admin)                        | Chosen OSS            |
 |--------------------|-------------------------------------------------------------|-----------------------|
 | Auth / SSO / MFA / **signup** | bespoke sessions, login history, known devices, passkeys, email verification, and any first-party signup form | **Keycloak 26.8.x** — whitelabeled IdP for customers **and** staff, with self-registration, email verification, brute-force protection, RBAC (see §5 for why Keycloak over Authelia/ZITADEL/Authentik) |
-| Keycloak datastore | — | **PostgreSQL** (Ubuntu pkg) — required by Keycloak in production; also the future `audit_outbox` home if sponsors want transactional audit |
+| Keycloak datastore | — | **MySQL 8.4** (Ubuntu pkg, inttests only; production reuses the existing shared MySQL) — Keycloak 26.8 supports MySQL 8.0/8.4 LTS with a bundled driver; H2 is not production-supported and Postgres would add a second database to prod infra |
 | OIDC login in first-party apps | ad-hoc session/token code | **`openid-client`** (certified Node RP library, IdP-agnostic) |
 | Reverse proxy      | — (new, thin: TLS termination + vhost proxying only, **no auth logic**) | **nginx** (Ubuntu pkg) |
 | RBAC               | `permissions.js`, `AdminRoles` table, string roles `SuperAdmin`/`Admin` | Keycloak **groups** → OIDC `groups` claim → first-party group→permission mapping |
@@ -43,8 +45,8 @@ Software being added:
 
 | Package        | Version (2026-11) | Official bare-metal channel                                             |
 |----------------|-------------------|--------------------------------------------------------------------------|
-| Keycloak       | 26.8.x (26.8.2)   | Official ZIP/TAR.GZ from keycloak.org / GitHub releases (sha1 checksums). **"Bare Metal / Virtual Machines" is an explicitly supported configuration.** Quarkus-based; needs Java 21 (`openjdk-21-jre` Ubuntu pkg) + PostgreSQL. https://www.keycloak.org/downloads , https://www.keycloak.org/server/supported-configurations |
-| PostgreSQL     | Ubuntu pkg        | Keycloak's primary supported production DB.                              |
+| Keycloak       | 26.8.x (26.8.2)   | Official ZIP/TAR.GZ from keycloak.org / GitHub releases (sha1 checksums). **"Bare Metal / Virtual Machines" is an explicitly supported configuration.** Quarkus-based; needs Java 21 (`openjdk-21-jre` Ubuntu pkg) + MySQL 8.0/8.4 (`KC_DB=mysql`, driver bundled). **Measured boot times (2026-11-10, LXC inttest + docker repro): fresh-schema cold boot ~220–250s — per-DDL Liquibase overhead dominates, not fsync (test knobs `innodb_flush_log_at_trx_commit=2` + `sync_binlog=0` help marginally); warm restart ~10s, which is the only number that matters for auth availability.** The server binds ports immediately and 503s while bootstrapping; poll `/health/ready` on the management port :9000 — not the aggregate `/health`, which a single-node jdbc-ping setup reports `DOWN` via a spurious cluster-health check. https://www.keycloak.org/downloads , https://www.keycloak.org/server/supported-configurations |
+| MySQL          | 8.4 LTS (Ubuntu pkg; Ubuntu 26.04 ships 8.4.x) | Keycloak's supported datastore for this deployment. In-process alternatives are H2 (dev-only, not prod-supported) — MySQL is already part of prod infra. inttest-only `mysql` role provisions a throwaway instance. **Gotcha (verified 2026-11-10): `community.mysql` hardcodes `CREATE USER … IDENTIFIED WITH mysql_native_password` for MySQL ≥ 8, but 8.4 ships that plugin disabled by default — the role re-enables it in its config drop-in (`mysql_native_password=ON`, startup-only option; gone entirely in MySQL 9.x).** |
 | nginx          | Ubuntu pkg        | Thin proxy only: TLS termination + vhost proxying. No auth modules used. |
 | Prometheus     | 3.16.0            | Upstream tarball + `.sha256` from GitHub releases (Ubuntu `prometheus` pkg is 2.x — too old). https://prometheus.io/download/ |
 | Alertmanager   | 0.35.0            | Upstream tarball + `.sha256`.                                            |
@@ -53,7 +55,7 @@ Software being added:
 | Loki           | 3.7.9             | Upstream binary + systemd unit we write. Single-binary mode, TSDB schema v13, filesystem storage. |
 | Grafana Alloy  | 1.21.x            | Same `apt.grafana.com` repo, package `alloy`. **Promtail is deprecated/EOL.** `loki.source.journal` needs `alloy` in `adm,systemd-journal` groups. |
 | Mailpit        | 1.33.1            | Single static Go binary. SMTP catch-all (tcp/1025) + REST API (`/api/v1/messages`) for assertions. **Test-only.** |
-| keycloak-bcrypt SPI | 1.2.x        | `github.com/leroyguillaume/keycloak-bcrypt` — widely deployed community plugin that adds a bcrypt `PasswordHashProvider`, enabling Admin-API user creation with `credentials: [{algorithm: 'bcrypt', hashedSaltedValue, hashIterations}]`. Pin + vendor the jar via Ansible. |
+| keycloak-bcrypt SPI | 1.7.0        | `github.com/leroyguillaume/keycloak-bcrypt` — widely deployed community plugin that adds a bcrypt `PasswordHashProvider`, enabling Admin-API user creation with the modern credential format `credentials: [{type: 'password', secretData: '{"value":"<$2b$…>","salt":""}', credentialData: '{"algorithm":"bcrypt","hashIterations":10}'}]` (verified against the SPI source: the provider stores the full hash as the secret with an empty salt; `hashedSaltedValue` is deprecated). Pin + checksum the jar via Ansible. The SPI's verifier accepts all `$2` variants (verified empirically 2026-11-10: `$2a$`, `$2b$`, `$2y$` all log in unmodified — no hash-prefix normalization needed). Keycloak's default hashing algorithm stays **Argon2** — imported credentials are transparently rehashed to Argon2 on first login. |
 | prom-client / openid-client / bcryptjs / mysql2 / nodemailer | current | npm. |
 
 Key integration facts verified:
@@ -148,8 +150,8 @@ flowchart TB
 
         subgraph IDP["identity (third-party, zero first-party auth code)"]
             KC["Keycloak :8080 (localhost only)<br/>self-registration + email verification<br/>groups/RBAC → claims<br/>bcrypt import via SPI<br/>user+admin event log"]
-            PG["PostgreSQL<br/>(Keycloak store)"]
-            KC --- PG
+            MYSQL["MySQL 8.4<br/>(Keycloak store;<br/>prod reuses existing)"]
+            KC --- MYSQL
         end
 
         subgraph OBS["observability"]
@@ -212,7 +214,8 @@ both customers and staff.
 5. **Audit events** emitted for auth actions, exportable to the central pipeline.
 6. **Operations survivability under rotating student maintainers** — docs depth,
    community size, searchability of answers, IaC story.
-7. Footprint and runtime dependencies (PostgreSQL is acceptable; JVM acceptable).
+7. Footprint and runtime dependencies (MySQL 8.4 acceptable — already part of
+   prod infra; JVM acceptable).
 
 ### Conclusion
 
@@ -280,11 +283,15 @@ flowchart TB
 
 - **Credential import**: Ansible installs the bcrypt SPI jar (pinned, checksummed)
   into Keycloak's providers dir; `scripts/import-users.ts` reads the Admin DB
-  (`mysql2`) and creates users via Admin API with
-  `{algorithm: 'bcrypt', hashedSaltedValue: '<$2b$…>', hashIterations: 10}` —
-  verbatim hashes, no preimage. Legacy hex+salt rows → user imported
-  `enabled: false`; recovery path is Keycloak's own reset email. `blocked` →
-  disabled. Groups assigned per §6 mapping.
+  (`mysql2`) and creates users via Admin API with the SPI's modern credential
+  format — `secretData: '{"value":"<$2b$…>","salt":""}'` +
+  `credentialData: '{"algorithm":"bcrypt","hashIterations":10}'` — verbatim
+  hashes, no preimage (the hash string embeds its own salt; the deprecated
+  `hashedSaltedValue` is not used). Legacy hex+salt rows → user imported
+  `enabled: false` with no credential; recovery path is Keycloak's own reset
+  email. `blocked` → disabled. Groups assigned per §6 mapping. Keycloak's
+  default algorithm remains **Argon2**: imported bcrypt credentials rehash to
+  Argon2 on first login (verified empirically on 26.8.x, Oct 2026).
 - **Outbound email** (requirement (b)): Keycloak realm SMTP (verification,
   reset); prod relay creds (e.g. SES) from vault; tests point everything at
   Mailpit (`localhost:1025`).
@@ -377,20 +384,39 @@ event: `seq`, `ts`, `actor`, `action`, `target`, `outcome`, `ip`, `user_agent`,
 
 ### W3 — Keycloak IdP (signup, OIDC, RBAC, email)
 
-- `postgres` role (Ubuntu pkg, socket-only, dedicated user/db for Keycloak).
-- `keycloak` role: official tarball (checksum) → `/opt/keycloak`, our systemd
-  unit + `EnvironmentFile` drop-in, bcrypt SPI jar vendored, realm JSON rendered
-  and loaded via `--import-realm`; health via management port :9000.
+- `mysql` role (Ubuntu pkg, inttest-only via `mysql_enabled`; prod Keycloak
+  reuses the existing shared MySQL): bind-address drop-in, databases/users via
+  `community.mysql` + `python3-pymysql`.
+- `keycloak` role: official tarball (sha1) → `/opt/keycloak`, our systemd
+  unit (`After=… mysql.service` in tests) + root-owned `0600`
+  `EnvironmentFile=/etc/keycloak.env` (`KC_DB=mysql`, `KC_DB_URL` with
+  `useSSL=false&allowPublicKeyRetrieval=true`, `KC_BOOTSTRAP_ADMIN_*`,
+  `JAVA_OPTS_APPEND=-Xms32m -Xmx512m`), bcrypt SPI jar vendored (sha256),
+  realm JSON rendered and loaded via `kc.sh start --import-realm`; health via
+  management port :9000. Default password algorithm stays Argon2. Boot is a
+  single clean start: `kc.sh build` runs at deploy time, then
+  `ExecStart … start --optimized --import-realm`; `flush_handlers` before
+  enable/start avoids the double-boot (and double Liquibase pass) a naive
+  notify + enable/start would cause.
 - App: `openid-client` RP middleware; `rbac.js`; `/whoami`.
 
 ### W4 — Credential import (`$2b$` verbatim)
 
-- `scripts/import-users.ts` (offline, operator-run; `mysql2`): reads
-  `dc.Admins`, `dc.admins`, `dc.users` (+ `AdminRoles` → precomputed groups) and
-  creates Keycloak users via Admin API (bcrypt SPI format; legacy hex+salt rows
-  disabled; blocked → disabled). Emits a dry-run report + audit import event.
-- For inttest: seeded users with `bcryptjs` cost-4 hashes created through the
-  same Admin-API path (single code path exercised by CI).
+- `scripts/import-users.ts` (operator-run; `mysql2`): reads `dc.Admins`,
+  `dc.admins`, `dc.users` (+ `AdminRoles` → precomputed groups) and creates
+  Keycloak users via Admin API (bcrypt SPI format above; legacy hex+salt rows
+  disabled; blocked → disabled). Importable iff the hash matches
+  `^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$`. Cross-table email overlap merges with
+  enabled = OR, groups = union, profile from `Admins`. Emits a dry-run report.
+- For inttest: `scripts/seed-test-db.ts` writes the dump's verbatim DDL plus
+  classified fixtures (bcryptjs cost-10 hashes; dead-format rows; blocked /
+  unverified / must-change / overlap cases), `import-users.ts` imports them,
+  and `scripts/test-credentials.ts` asserts real logins via the direct access
+  grant (password grant — no form scripting), including the Argon2-rehash check
+  against Keycloak's own store. **Gotcha (verified 2026-11-10): Keycloak's DDL
+  creates UPPERCASE table names (`CREDENTIAL`, `USER_ENTITY`, …) and MySQL is
+  case-sensitive on Linux (`lower_case_table_names=0`) — direct-SQL assertions
+  must query the uppercase names (column qualifiers too).**
 
 ### W5 — Metrics
 
@@ -445,7 +471,7 @@ event: `seq`, `ts`, `actor`, `action`, `target`, `outcome`, `ip`, `user_agent`,
 |--------------------------|--------------------------------------------------------------------------------------------------|
 | `test-http.ts` (existing)| `/health`, `/fib` happy/sad path (unchanged; via nginx now)                                       |
 | `test-oidc`              | discovery fetch; unauthenticated `GET /private` → redirect to Keycloak; full code+PKCE flow via `openid-client` with scripted first-factor; id_token verifies against JWKS; `groups` claim present and correct per seeded user; wrong-audience token rejected; tampered state rejected |
-| `test-credentials`       | imported bcrypt users: (a) short password round-trips, (b) exactly-72-byte password works, (c) 100-byte password works (bcrypt truncation parity with the dump), (d) wrong password fails, (e) disabled user cannot log in — via the real OIDC flow |
+| `test-credentials`       | imported bcrypt users log in via the direct access grant (password grant); `groups` claim per mapping (super-admins / admins / customers, union on cross-table email overlap); wrong password rejected; blocked / unverified / inactive accounts disabled; dead hex+salt format rejected; must-change-password flagged ("Account is not fully set up"); bcrypt credential rehashed to Argon2 after first login (checked in Keycloak's `credential` table) |
 | `test-registration`      | walk Keycloak's **real registration form** (scripted form POST) → user in `pending-approval`; verification email arrives in Mailpit → extract one-time link → verify; login still blocked until approved |
 | `test-approval`          | approve as `approvers` member (Admin API group promotion) → `groups` claim now contains `customers` → app grants access; deny → user disabled + audit event; non-approver gets 403 |
 | `test-audit`             | perform N audited actions; poll Loki for `{service="node-express-app"} \| json \| audit="true"`; all `seq` 1..N present (no gaps); Keycloak login/registration events visible with `service="keycloak"` |
@@ -465,11 +491,15 @@ event: `seq`, `ts`, `actor`, `action`, `target`, `outcome`, `ip`, `user_agent`,
 
 ## 9. Phasing (each phase ends green: `npm run check:ts && npm run inttest`)
 
+Rev-4 reorder: the IdP milestone is pulled ahead of the reverse proxy and app
+changes. It is independently measurable (issue-tracker progress), needs no
+nginx, and de-risks the bcrypt import earliest. M0/M1 do not depend on M2.
+
 | Milestone | Deliverable | Exit criteria |
 |-----------|-------------|---------------|
-| M0 | Plumbing: suite runner, testnet helper, feature flags, vault skeleton, journald persistence | existing suites pass unchanged |
-| M1 | `reverse_proxy` (thin nginx, app behind it) | http tests pass through nginx; direct :3000 refused |
-| M2 | `postgres` + `keycloak` + bcrypt SPI + `import-users.ts` + app OIDC RP | `test-oidc` + `test-credentials` green (incl. >72-byte case) |
+| M0 | **IdP-first**: `roles/mysql` (inttest-only) + `roles/keycloak`, bcrypt SPI, realm-as-code, `import-users.ts`, `seed-test-db.ts`, `test-credentials` | `test-credentials` green from a dump-shaped seeded DB (import, groups claim, disabled/dead accounts, Argon2 rehash); existing http suite unchanged |
+| M1 | Plumbing: suite runner, testnet helper, vault skeleton, journald persistence; app OIDC RP (`openid-client`) | `test-oidc` green |
+| M2 | `reverse_proxy` (thin nginx, app behind it) | http tests pass through nginx; direct :3000 refused |
 | M3 | RBAC groups + `rbac.js` + protected routes | group-claim assertions green; non-member 403 |
 | M4 | Registration flow test + approval gate + email | `test-registration` + `test-approval` green (Mailpit receives verification mail) |
 | M5 | `node_exporter` + app `/metrics` + `prometheus` | `test-metrics` green |

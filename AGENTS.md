@@ -21,11 +21,15 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 
 - `app/` Express source.
 - `playbooks/site.yml`.
-- `roles/`.
+- `roles/` (`mysql` + `keycloak` gated by `mysql_enabled`/`keycloak_enabled`).
 - `scripts/run.ts` subprocess helper.
 - `scripts/lxd.ts` container lifecycle.
 - `scripts/inttest.ts` one-click flow.
 - `scripts/test-http.ts` HTTP assertions using `APP_URL`.
+- `scripts/test-credentials.ts` Keycloak login assertions (seed -> import -> login).
+- `scripts/seed-test-db.ts` writes dump-shaped fixtures; `scripts/import-users.ts` imports them into Keycloak.
+- `scripts/keycloak-admin.ts` minimal Admin API client; `scripts/mysql-config.ts` shared MySQL env config.
+- `scripts/test-users.ts` shared user fixtures for the credential inttest.
 - `scripts/self.ts` target-host deploy (Linux only).
 - `.run/` generated per test and gitignored.
 - `inventories/lxc/` base vars (hosts.ini generated per run).
@@ -36,6 +40,8 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - Ansible control node requires Linux/WSL2.
 - GitHub CI uses LXD via `lxd init --minimal`, which needs snap (runners have snapd).
 - The Node runtime role installs `nodejs` and `npm` from Ubuntu packages; systemd uses `/usr/bin/node`.
+- The `mysql` role exists for inttests only (Keycloak's test datastore); production Keycloak reuses the existing shared MySQL. Deployment roles never reference LXC or Docker regardless.
+- Imported passwords are bcrypt (`$2a/$2b/$2y`, 60-char) via `leroyguillaume/keycloak-bcrypt`; Keycloak's default algorithm stays Argon2 and rehashes imported credentials on first login. Legacy hex+salt rows import disabled with no credential.
 - Busy-loop waits are used for simplicity in TypeScript; keep them short.
 - LXD container image download can be the dominant cold-start cost.
 

@@ -13,7 +13,9 @@
     "ensure:lxd": "node scripts/ensure-lxd.ts"
   },
   "dependencies": {
-    "express": "^5.3.0"
+    "bcryptjs": "^3.0.3",
+    "express": "^5.3.0",
+    "mysql2": "^3.24.6"
   },
   "engines": {
     "node": ">=22.12.0"

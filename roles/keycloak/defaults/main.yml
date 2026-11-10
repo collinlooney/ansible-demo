@@ -1,0 +1,35 @@
+---
+# Keycloak IdP — official tarball distribution (bare metal), MySQL datastore.
+keycloak_version: '26.8.2'
+keycloak_sha1: '7918de2786c7db466152128bea350becbd40a58f'
+keycloak_download_url: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"
+
+# leroyguillaume/keycloak-bcrypt SPI: enables bcrypt password imports.
+keycloak_bcrypt_jar_url: 'https://github.com/leroyguillaume/keycloak-bcrypt/releases/download/v1.7.0/keycloak-bcrypt-1.7.0.jar'
+keycloak_bcrypt_jar_sha256: 'b32a7557c1bdcf67da9bfde075b20aabd00d26e04aa4db2ba85765b8e94c9f28'
+
+keycloak_install_dir: /opt/keycloak
+keycloak_user: keycloak
+keycloak_group: keycloak
+
+# Datastore. In-process default for the inttest container; production reuses
+# the existing shared MySQL instance (override host/port/creds per inventory).
+keycloak_db_host: '127.0.0.1'
+keycloak_db_port: 3306
+keycloak_db_name: keycloak
+keycloak_db_username: keycloak
+keycloak_db_password:  # set per environment; no default
+
+# Keycloak 26 bootstrap admin (created in master realm on first boot).
+keycloak_bootstrap_admin_username: kcadmin
+keycloak_bootstrap_admin_password:  # set per environment; no default
+
+# Realm rendered as code and loaded via `kc.sh start --import-realm`.
+keycloak_realm: digiclips
+keycloak_ssl_required: external
+keycloak_registration_allowed: false
+
+# Service wiring.
+keycloak_after_units: 'network.target'
+keycloak_java_opts: '-Xms32m -Xmx512m'
+keycloak_hostname_strict: false
