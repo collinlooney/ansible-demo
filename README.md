@@ -73,9 +73,10 @@ Without act, `npm run inttest` runs the same steps the integration job runs.
 
 ## Performance instrumentation
 
-- Every `inttest`/`inttest:self` run times each phase and prints a slowest-first breakdown (pass or fail) as its final output.
-- Every `ansible-playbook` invocation enables `ansible.posix.profile_tasks` + `ansible.posix.profile_roles`, so runs end with a per-task/per-role timing table. On failure the full playbook output is retained at `.run/<id>/ansible.log`.
-- `INTTEST_ANSIBLE_LIVE=1 npm run inttest` streams Ansible output as it runs (demo mode) instead of capturing it.
+- Every `inttest`/`inttest:self`/`bench:apt` run times each phase and can print a slowest-first breakdown (pass or fail) as its final output — on by default in plain mode, off in rich mode (the task list already shows per-step times).
+- Every `ansible-playbook` invocation enables `ansible.posix.profile_tasks` + `ansible.posix.profile_roles`, so runs can end with a per-task/per-role timing table — same default as the breakdown (on in plain, off in rich). On failure the full playbook output is retained at `.run/<id>/ansible.log`.
+- On a real terminal (stdout is a TTY, not CI) the long-running scripts render a rich task list: one line per phase with a live elapsed counter, a scrolling preview of each step's command output (Ansible, `lxc launch`, the test runners), and live statuses (`[attempt 3]`, `[readiness status 503]`). Piped output and CI keep the original timestamped log lines — rich rendering uses cursor redraws that are garbage in a pipe. Force either with `--rich-output` / `--no-rich-output`, and the two end-of-run reports with `--timing` / `--no-timing` and `--profile` / `--no-profile` (see `--help`).
+- `INTTEST_ANSIBLE_LIVE=1 npm run inttest` streams Ansible output as it runs (demo mode) instead of capturing it. Plain mode only — rich mode always streams into the task's live preview.
 - `npm run bench:apt` benchmarks the roles' `apt`-tagged tasks against the equivalent raw `apt-get` commands on a second, identical fresh container and prints a side-by-side comparison.
 - `inttest` and `bench:apt` take throwaway-target speed flags (see `--help`):
   - `--unsafe-io` / `--no-unsafe-io` — pass dpkg `--force-unsafe-io` during apt installs. **Default on for these scripts only**; the roles' `apt_dpkg_options` default stays stock, so `inttest:self` and production deploys always get fsync-safe installs.

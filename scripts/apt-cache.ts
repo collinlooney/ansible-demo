@@ -10,7 +10,7 @@ const APT_CACHE_PORT = 3142;
  * workstation/demo acceleration, never a requirement.
  */
 export async function probeAptCache(): Promise<string | null> {
-  const bridgeIp = getLxdBridgeIp();
+  const bridgeIp = await getLxdBridgeIp();
   if (bridgeIp == null) {
     return null;
   }

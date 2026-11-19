@@ -77,7 +77,7 @@ async function main(): Promise<void> {
       });
     }
 
-    const bridgeIp = getLxdBridgeIp();
+    const bridgeIp = await getLxdBridgeIp();
     if (bridgeIp == null) {
       throw new Error('lxdbr0 is not initialized — run `npm run ensure:lxd` first');
     }

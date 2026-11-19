@@ -1,4 +1,4 @@
-import { logger } from './logger.ts';
+import type { StepContext, StepOptions, Ui } from './ui.ts';
 
 export interface StepRecord {
   readonly name: string;
@@ -7,11 +7,12 @@ export interface StepRecord {
 
 export interface StepTimer {
   /**
-   * Runs fn as a named step: logs start and finish, records the duration, and
-   * rethrows failures (the failed step is still recorded, so the breakdown
-   * shows where a run died).
+   * Runs fn as a named step: displays it through the ui (tasuku task in
+   * rich mode, `[prefix] > name` / `< name (dur)` logger lines in plain
+   * mode), records the duration, and rethrows failures (the failed step is
+   * still recorded, so the breakdown shows where a run died).
    */
-  run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(name: string, fn: (ctx: StepContext) => T | Promise<T>, options?: StepOptions): Promise<T>;
   /** Steps in completion order. */
   readonly records: readonly StepRecord[];
   /** Slowest-first breakdown with percentages; one line per step. */
@@ -27,22 +28,30 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * Minimal step timer for the long-running scripts. Every logical phase of a
- * run becomes a step; the report is printed at the end (and on failure) so a
- * slow phase is visible without re-running with a profiler.
+ * Step timer for the long-running scripts. Every logical phase of a run
+ * becomes a step; the report is printed at the end (and on failure) when the
+ * --timing flag enables it, so a slow phase is visible without re-running
+ * with a profiler. Display lives in the ui: plain mode keeps the original
+ * timestamped lines byte for byte, rich mode shows tasuku tasks with a live
+ * per-step elapsed counter (making the breakdown redundant there — hence the
+ * mode-dependent default).
  */
-export function createStepTimer(prefix: string): StepTimer {
+export function createStepTimer(prefix: string, ui: Ui): StepTimer {
   const records: StepRecord[] = [];
   return {
-    async run<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
-      logger.log(`[${prefix}] > ${name}`);
+    async run<T>(name: string, fn: (ctx: StepContext) => T | Promise<T>, options?: StepOptions): Promise<T> {
+      if (!ui.rich) {
+        ui.log(`[${prefix}] > ${name}`);
+      }
       const started = process.hrtime.bigint();
       try {
-        return await fn();
+        return await ui.step(name, fn, options);
       } finally {
         const ms = Number(process.hrtime.bigint() - started) / 1e6;
         records.push({ name, ms });
-        logger.log(`[${prefix}] < ${name} (${formatDuration(ms)})`);
+        if (!ui.rich) {
+          ui.log(`[${prefix}] < ${name} (${formatDuration(ms)})`);
+        }
       }
     },
     records,

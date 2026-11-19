@@ -1,4 +1,4 @@
-import { execOrThrow } from './run.ts';
+import { execFileOrThrow } from './run.ts';
 import {
   ensureLxd,
   launchContainer,
@@ -13,14 +13,18 @@ import { probeAptCache } from './apt-cache.ts';
 import { createRunState, renderInventory, generateSshKey } from './target.ts';
 import { runAnsiblePlaybook, printProfileRecap, parseTaskTimes, getTaskTime } from './ansible.ts';
 import {
-  parsePerfFlags,
-  DEFAULT_PERF_FLAGS,
+  parseScriptFlags,
+  DEFAULT_SCRIPT_FLAGS,
+  resolveOutputFlags,
+  OUTPUT_FLAG_USAGE,
   STOCK_DPKG_OPTIONS,
   UNSAFE_IO_DPKG_OPTIONS,
   dpkgOptionArgs,
 } from './flags.ts';
 import { createStepTimer, formatDuration } from './timing.ts';
+import { createUi } from './ui.ts';
 import { logger } from './logger.ts';
+import type { Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -47,6 +51,8 @@ const FLAG_USAGE = [
   '  --tmpfs / --no-tmpfs          back the containers rootfs with tmpfs (default: off)',
   '  --apt-cache / --no-apt-cache  use the local apt cache if one answers (default: on;',
   '                                use --no-apt-cache to measure raw mirror behavior)',
+  '',
+  OUTPUT_FLAG_USAGE,
   '  --help',
 ].join('\n');
 interface AptOp {
@@ -96,12 +102,16 @@ interface ManualResult {
   readonly summary: readonly string[];
 }
 
-function runManualOp(containerName: string, op: AptOp): ManualResult {
+async function runManualOp(
+  containerName: string,
+  op: AptOp,
+  preview: Writable | null,
+): Promise<ManualResult> {
   const started = process.hrtime.bigint();
-  const result = execOrThrow(
+  const result = await execFileOrThrow(
     'lxc',
     ['exec', containerName, '--', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', ...op.aptArgs],
-    { timeout: 600000 },
+    { timeout: 600000, preview },
   );
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   const summary = result.stdout
@@ -130,12 +140,13 @@ function writeBenchPlaybook(stateRunDir: string): string {
 }
 
 function printComparison(
+  log: (...args: unknown[]) => void,
   ops: readonly AptOp[],
   taskTimes: Map<string, number>,
   manual: Map<string, ManualResult>,
 ): void {
   const labelWidth = Math.max(...ops.map((op) => op.label.length));
-  logger.log(`[bench] ${'operation'.padEnd(labelWidth)}  ${'ansible'.padStart(9)}  ${'manual'.padStart(9)}  ${'delta'.padStart(9)}`);
+  log(`[bench] ${'operation'.padEnd(labelWidth)}  ${'ansible'.padStart(9)}  ${'manual'.padStart(9)}  ${'delta'.padStart(9)}`);
   let ansibleTotal = 0;
   let manualTotal = 0;
   for (const op of ops) {
@@ -150,28 +161,30 @@ function printComparison(
       ansibleTotal += ansibleMs;
       manualTotal += manualMs;
     }
-    logger.log(
+    log(
       `[bench] ${op.label.padEnd(labelWidth)}  ${ansibleCell.padStart(9)}  ${manualCell.padStart(9)}  ${deltaCell.padStart(9)}`,
     );
   }
-  logger.log(
+  log(
     `[bench] ${'task total'.padEnd(labelWidth)}  ${formatDuration(ansibleTotal).padStart(9)}  ${formatDuration(manualTotal).padStart(9)}`,
   );
   for (const op of ops) {
     const summary = manual.get(op.taskName)?.summary ?? [];
     if (summary.length > 0) {
-      logger.log(`[bench]   ${op.label}: ${summary.join(' | ')}`);
+      log(`[bench]   ${op.label}: ${summary.join(' | ')}`);
     }
   }
 }
 
 async function main(): Promise<void> {
-  const flags = parsePerfFlags(process.argv.slice(2), DEFAULT_PERF_FLAGS, FLAG_USAGE);
+  const flags = parseScriptFlags(process.argv.slice(2), DEFAULT_SCRIPT_FLAGS, FLAG_USAGE, { perf: true });
+  const output = resolveOutputFlags(flags);
+  const ui = createUi({ prefix: 'bench', rich: output.rich });
   const dpkgOptions = flags.unsafeIo ? UNSAFE_IO_DPKG_OPTIONS : STOCK_DPKG_OPTIONS;
   const aptOps = buildAptOps(dpkgOptions);
   const state = createRunState('node-express-bench');
   fs.mkdirSync(state.runDir, { recursive: true });
-  const timer = createStepTimer('bench');
+  const timer = createStepTimer('bench', ui);
   const manualName = `${state.containerName}-manual`;
   const ansibleName = `${state.containerName}-ansible`;
 
@@ -180,73 +193,79 @@ async function main(): Promise<void> {
   let failed = false;
 
   try {
-    logger.log(`[bench] run id ${state.id}`);
-    logger.log(`[bench] flags: unsafe-io=${flags.unsafeIo ? 'on' : 'off'} tmpfs=${flags.tmpfs ? 'on' : 'off'} (dpkg: ${dpkgOptions})`);
+    ui.log(`[bench] run id ${state.id}`);
+    ui.log(`[bench] flags: unsafe-io=${flags.unsafeIo ? 'on' : 'off'} tmpfs=${flags.tmpfs ? 'on' : 'off'} (dpkg: ${dpkgOptions})`);
 
     await timer.run('ensure LXD', () => ensureLxd());
 
     const aptCacheUrl = flags.aptCache
       ? await timer.run('probe apt cache', () => probeAptCache())
       : null;
-    logger.log(
+    ui.log(
       `[bench] apt cache: ${aptCacheUrl ?? (flags.aptCache ? 'unavailable, mirrors direct' : 'disabled by flag')}`,
     );
 
     const manualTimes = new Map<string, ManualResult>();
 
-    await timer.run(`launch manual container ${manualName}`, () => {
-      launchContainer(manualName, { tmpfs: flags.tmpfs });
-    });
+    await timer.run(`launch manual container ${manualName}`, (ctx) =>
+      launchContainer(manualName, { tmpfs: flags.tmpfs, preview: ctx.preview }));
     manualCreated = true;
-    await timer.run('wait for cloud-init (manual)', () => waitForCloudInit(manualName));
+    await timer.run('wait for cloud-init (manual)', (ctx) => waitForCloudInit(manualName, ctx.preview));
     await timer.run('configure target apt (manual)', () => configureTargetApt(manualName, aptCacheUrl));
 
-    logger.log('[bench] phase 1/2: raw apt-get via lxc exec');
+    ui.log('[bench] phase 1/2: raw apt-get via lxc exec');
     for (const op of aptOps) {
-      const result = await timer.run(`manual: ${op.label}`, () => runManualOp(manualName, op));
+      const result = await timer.run(
+        `manual: ${op.label}`,
+        (ctx) => runManualOp(manualName, op, ctx.preview),
+        { previewLines: 8 },
+      );
       manualTimes.set(op.taskName, result);
     }
 
     const publicKey = await timer.run('generate SSH key', () => generateSshKey(state));
-    await timer.run(`launch ansible container ${ansibleName}`, () => {
-      launchContainer(ansibleName, { tmpfs: flags.tmpfs });
-    });
+    await timer.run(`launch ansible container ${ansibleName}`, (ctx) =>
+      launchContainer(ansibleName, { tmpfs: flags.tmpfs, preview: ctx.preview }));
     ansibleCreated = true;
-    await timer.run('wait for cloud-init (ansible)', () => waitForCloudInit(ansibleName));
+    await timer.run('wait for cloud-init (ansible)', (ctx) => waitForCloudInit(ansibleName, ctx.preview));
     await timer.run('configure target apt (ansible)', () => configureTargetApt(ansibleName, aptCacheUrl));
     await timer.run('publish SSH key', () => publishPublicKey(ansibleName, publicKey));
     const ip = await timer.run('discover container IP', () => getContainerIpv4(ansibleName));
-    await timer.run('wait for SSH', () => waitForSsh(ip, state.keyPath));
+    await timer.run('wait for SSH', (ctx) =>
+      waitForSsh(ip, state.keyPath, (attempt) => ctx.setStatus(`attempt ${attempt}`)));
     await timer.run('render inventory', () => {
       fs.writeFileSync(state.inventoryPath, renderInventory(ip, state));
     });
     const playbookPath = writeBenchPlaybook(state.runDir);
 
-    logger.log('[bench] phase 2/2: the same operations through ansible.builtin.apt');
-    const ansibleResult = await timer.run('ansible-playbook --tags apt', () =>
+    ui.log('[bench] phase 2/2: the same operations through ansible.builtin.apt');
+    const ansibleResult = await timer.run('ansible-playbook --tags apt', (ctx) =>
       runAnsiblePlaybook({
         inventoryPath: state.inventoryPath,
         playbookPath,
         extraVars: JSON.stringify({ apt_dpkg_options: dpkgOptions }),
         extraArgs: ['--tags', 'apt'],
+        preview: ctx.preview,
         logPath: path.join(state.runDir, 'ansible.log'),
-      }));
+      }), { previewLines: 8 });
 
     const taskTimes = parseTaskTimes(ansibleResult.stdout);
-    printProfileRecap(ansibleResult.stdout);
-    printComparison(aptOps, taskTimes, manualTimes);
+    if (output.profile) {
+      printProfileRecap(ansibleResult.stdout, ui.log);
+    }
+    printComparison(ui.log, aptOps, taskTimes, manualTimes);
 
     const wallMs = timer.records.find((record) => record.name.startsWith('ansible-playbook'))?.ms ?? 0;
     const taskSumMs = [...taskTimes.values()].reduce((sum, ms) => sum + ms, 0);
-    logger.log(
+    ui.log(
       `[bench] ansible wall ${formatDuration(wallMs)} vs task sum ${formatDuration(taskSumMs)} ` +
         `=> connection/module overhead ${formatDuration(Math.max(0, wallMs - taskSumMs))}`,
     );
-    logger.log('[bench] PASS');
+    ui.log('[bench] PASS');
   } catch (error) {
     failed = true;
     const message = error instanceof Error ? error.message : String(error);
-    logger.error(`[bench] FAILED: ${message}`);
+    ui.error(`[bench] FAILED: ${message}`);
     process.exitCode = 1;
   } finally {
     if (manualCreated) {
@@ -254,7 +273,7 @@ async function main(): Promise<void> {
         await timer.run('destroy manual container', () => destroyContainer(manualName));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error(`[bench] destroy manual failed: ${message}`);
+        ui.error(`[bench] destroy manual failed: ${message}`);
         process.exitCode = 1;
       }
     }
@@ -263,15 +282,17 @@ async function main(): Promise<void> {
         await timer.run('destroy ansible container', () => destroyContainer(ansibleName));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error(`[bench] destroy ansible failed: ${message}`);
+        ui.error(`[bench] destroy ansible failed: ${message}`);
         process.exitCode = 1;
       }
     }
-    logger.log(timer.report());
+    if (output.timing) {
+      ui.log(timer.report());
+    }
     if (!failed) {
       fs.rmSync(state.runDir, { recursive: true, force: true });
     } else {
-      logger.error(`[bench] run artifacts retained at ${state.runDir}`);
+      ui.error(`[bench] run artifacts retained at ${state.runDir}`);
     }
   }
 }

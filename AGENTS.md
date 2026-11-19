@@ -16,20 +16,23 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - Preserve `.run/<id>` on failure for diagnostics; clean on success.
 - Generated host entry point must use the discovered container IP, never hard-code IPs.
 - Scripts must remain erasable TypeScript: no enums, no parameter properties, `import type` where appropriate, no emit.
-- Speed optimizations are inttest-only opt-ins: roles' `apt_dpkg_options` defaults to stock dpkg behavior (fsync-safe), and only `scripts/inttest.ts`/`scripts/bench-apt.ts` pass `--force-unsafe-io` (flag `--unsafe-io`, default on) or use tmpfs-backed targets (flag `--tmpfs`, default off). `inttest:self` and production deploys never take these flags. The local apt cache (apt-cacher-ng) is likewise scripts-only: it is probed and injected into targets by the scripts (`--apt-cache`, default on with silent fallback), never configured by roles. Mirror preferences are local configuration (`.apt-cache-mirrors` / `APT_CACHE_MIRRORS`, both gitignored-or-env): never hardcode a mirror hostname in the repo — the fastest mirror depends on where the machine lives.
+- Speed optimizations are inttest-only opt-ins: roles' `apt_dpkg_options` defaults to stock dpkg behavior (fsync-safe), and only `scripts/inttest.ts`/`scripts/bench-apt.ts` pass `--force-unsafe-io` (flag `--unsafe-io`, default on) or use tmpfs-backed targets (flag `--tmpfs`, default off). `inttest:self` and production deploys never take these flags (the parser rejects perf flags there). The local apt cache (apt-cacher-ng) is likewise scripts-only: it is probed and injected into targets by the scripts (`--apt-cache`, default on with silent fallback), never configured by roles. Mirror preferences are local configuration (`.apt-cache-mirrors` / `APT_CACHE_MIRRORS`, both gitignored-or-env): never hardcode a mirror hostname in the repo — the fastest mirror depends on where the machine lives.
+- Plain output is the compatibility contract: piped/CI runs keep the old timestamped log byte for byte (gated reports on by default there), and rich tasuku rendering is opt-in/auto only for a real non-TTY-free terminal. Keep new log lines behind `ui.log`/`ui.error` so they respect the mode.
 
 ## Repo map
 
 - `app/` Express source.
 - `playbooks/site.yml`.
 - `roles/` (`mysql` + `keycloak` gated by `mysql_enabled`/`keycloak_enabled`).
-- `scripts/run.ts` subprocess helper.
+- `scripts/run.ts` subprocess helper (sync `execFileSync` for quick queries; async `execFile`/`execFileOrThrow` with a `preview` sink for anything long-running — rich mode's spinner must not be blocked by spawnSync).
+- `scripts/ui.ts` presentation layer: rich mode = tasuku task list with `streamPreview` + per-step times; plain mode = the old timestamped logger (rich only when `stdout.isTTY && !CI` — cursor redraws are garbage in a pipe, so agents and CI always get plain output).
+- `scripts/flags.ts` shared CLI flags: perf flags (`--unsafe-io`/`--tmpfs`/`--apt-cache`, throwaway scripts only) and output flags (`--rich-output`/`--timing`/`--profile` + negations; auto-resolve: rich = TTY && !CI, timing/profile = on in plain, off in rich).
 - `scripts/lxd.ts` container lifecycle + target-side apt config (proxy/retries injection).
 - `scripts/apt-cache.ts` local apt-cacher-ng probe (auto-detect; absent = direct mirrors).
 - `scripts/ensure-apt-cache.ts` host-side cache setup (`npm run ensure:apt-cache`, optional; preferred mirrors from local `.apt-cache-mirrors`/`APT_CACHE_MIRRORS` — never hardcoded in the repo).
 - `scripts/inttest.ts` one-click flow.
 - `scripts/target.ts` per-run state: `.run/<id>` dir, SSH key, inventory rendering.
-- `scripts/timing.ts` step timer; long-running scripts print a slowest-first breakdown.
+- `scripts/timing.ts` step timer; owns the plain-mode `> step` / `< step (dur)` lines and the gated slowest-first breakdown (`--timing`).
 - `scripts/ansible.ts` profiled `ansible-playbook` invocation (profile_tasks/profile_roles) + recap parsing.
 - `scripts/bench-apt.ts` apt benchmark: roles' `apt`-tagged tasks vs raw apt-get (`npm run bench:apt`).
 - `scripts/test-http.ts` HTTP assertions using `APP_URL`.

@@ -1,4 +1,4 @@
-import { execOrThrow, type ExecResult, type ExecOptions } from './run.ts';
+import { execFileOrThrow, type ExecResult, type AsyncExecOptions } from './run.ts';
 import { logger } from './logger.ts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -24,7 +24,7 @@ export function ansibleProfileEnv(base: NodeJS.ProcessEnv = process.env): NodeJS
   };
 }
 
-export interface AnsibleRunOptions extends ExecOptions {
+export interface AnsibleRunOptions extends AsyncExecOptions {
   readonly inventoryPath: string;
   /** Defaults to playbooks/site.yml relative to cwd. */
   readonly playbookPath?: string;
@@ -35,7 +35,7 @@ export interface AnsibleRunOptions extends ExecOptions {
   readonly logPath?: string;
 }
 
-export function runAnsiblePlaybook(options: AnsibleRunOptions): ExecResult {
+export async function runAnsiblePlaybook(options: AnsibleRunOptions): Promise<ExecResult> {
   const playbookPath = options.playbookPath ?? path.join(process.cwd(), 'playbooks', 'site.yml');
   const args = ['-i', options.inventoryPath, playbookPath];
   if (options.extraVars != null) {
@@ -44,7 +44,7 @@ export function runAnsiblePlaybook(options: AnsibleRunOptions): ExecResult {
   if (options.extraArgs != null) {
     args.push(...options.extraArgs);
   }
-  const result = execOrThrow('ansible-playbook', args, {
+  const result = await execFileOrThrow('ansible-playbook', args, {
     ...options,
     env: ansibleProfileEnv(options.env ?? process.env),
   });
@@ -58,15 +58,20 @@ export function runAnsiblePlaybook(options: AnsibleRunOptions): ExecResult {
  * Prints the profile_tasks/profile_roles recap (everything from the
  * "TASKS RECAP" banner to the end of the playbook output). The rest of the
  * output — task results — stays out of the console unless the caller streams.
+ * `log` defaults to the plain logger; rich-mode callers pass ui.log so the
+ * recap renders above the tasuku task list instead of corrupting it.
  */
-export function printProfileRecap(output: string): void {
+export function printProfileRecap(
+  output: string,
+  log: (...args: unknown[]) => void = logger.log,
+): void {
   const marker = output.indexOf('TASKS RECAP');
   if (marker === -1) {
-    logger.log('[ansible] no profile recap found (ansible.posix callbacks unavailable?)');
+    log('[ansible] no profile recap found (ansible.posix callbacks unavailable?)');
     return;
   }
-  logger.log('[ansible] per-task profile:');
-  logger.log(output.slice(marker).trimEnd());
+  log('[ansible] per-task profile:');
+  log(output.slice(marker).trimEnd());
 }
 
 /**

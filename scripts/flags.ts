@@ -1,12 +1,19 @@
 import { logger } from './logger.ts';
 
 /**
- * CLI flags shared by the throwaway-target test scripts (inttest, bench:apt).
+ * CLI flags shared by the throwaway-target test scripts (inttest, bench:apt)
+ * and the output flags shared by every long-running script (inttest, self,
+ * bench:apt).
  *
- * Both optimizations exist purely for speed on clean, disposable LXC targets
- * and must never reach a real host: the roles' apt_dpkg_options default stays
- * stock (role defaults files), and only these scripts opt in — self.ts and
- * production deploys take no flags at all.
+ * The perf optimizations exist purely for speed on clean, disposable LXC
+ * targets and must never reach a real host: the roles' apt_dpkg_options
+ * default stays stock (role defaults files), and only the throwaway scripts
+ * opt in — self.ts and production deploys take no perf flags at all (the
+ * parser rejects them there).
+ *
+ * The output flags select terminal presentation: rich tasuku rendering vs
+ * the old timestamped plain logger, and whether the end-of-run timing
+ * breakdown / ansible profile recap are printed.
  */
 export interface PerfFlags {
   /** Pass --force-unsafe-io to dpkg during apt installs (inttest default: on). */
@@ -17,7 +24,21 @@ export interface PerfFlags {
   readonly aptCache: boolean;
 }
 
+export interface OutputFlags {
+  /** Rich tasuku task list. undefined = auto (TTY and not CI). */
+  readonly rich?: boolean;
+  /** End-of-run timing breakdown. undefined = auto (plain: on, rich: off). */
+  readonly timing?: boolean;
+  /** Ansible tasks/roles profile recap. undefined = auto (plain: on, rich: off). */
+  readonly profile?: boolean;
+}
+
+export interface ScriptFlags extends PerfFlags, OutputFlags {}
+
 export const DEFAULT_PERF_FLAGS: PerfFlags = { unsafeIo: true, tmpfs: false, aptCache: true };
+/** Everything resolves from the environment: see resolveOutputFlags. */
+export const DEFAULT_OUTPUT_FLAGS: OutputFlags = {};
+export const DEFAULT_SCRIPT_FLAGS: ScriptFlags = { ...DEFAULT_PERF_FLAGS, ...DEFAULT_OUTPUT_FLAGS };
 
 /** Roles' stock dpkg options — the production-safe default. */
 export const STOCK_DPKG_OPTIONS = 'force-confdef,force-confold';
@@ -34,24 +55,88 @@ export function dpkgOptionArgs(dpkgOptions: string): string[] {
   return dpkgOptions.split(',').flatMap((option) => ['-o', `Dpkg::Options::=--${option}`]);
 }
 
-/** Parses --unsafe-io/--no-unsafe-io, --tmpfs/--no-tmpfs, --help; exits on bad input. */
-export function parsePerfFlags(argv: readonly string[], defaults: PerfFlags, usage: string): PerfFlags {
+/** Same env vars tasuku itself treats as "CI" (its append-only render mode). */
+export function isCiEnvironment(): boolean {
+  return Boolean(process.env.CI || process.env.CONTINUOUS_INTEGRATION || process.env.BUILD_NUMBER);
+}
+
+export interface ResolvedOutputFlags {
+  readonly rich: boolean;
+  readonly timing: boolean;
+  readonly profile: boolean;
+}
+
+/**
+ * Resolves the tri-state output flags against the environment:
+ *  - rich: default on only for a real, non-CI terminal. tasuku redraws the
+ *    task list with cursor escapes, which is exactly what you don't want in
+ *    a pipe or a CI log, and an explicit --rich-output can't work without a
+ *    TTY either (it degrades to plain with a warning).
+ *  - timing/profile: default on in plain mode (the old output, byte for
+ *    byte), off in rich mode (the task list already shows per-step elapsed
+ *    times, and the recap would bury it).
+ */
+export function resolveOutputFlags(flags: OutputFlags): ResolvedOutputFlags {
+  const tty = process.stdout.isTTY === true;
+  let rich = flags.rich ?? (tty && !isCiEnvironment());
+  if (rich && !tty) {
+    logger.error('[flags] --rich-output needs a TTY; falling back to plain output');
+    rich = false;
+  }
+  return {
+    rich,
+    timing: flags.timing ?? !rich,
+    profile: flags.profile ?? !rich,
+  };
+}
+
+export interface ParseOptions {
+  /** Whether the perf flags (--unsafe-io/--tmpfs/--apt-cache) are accepted here. */
+  readonly perf: boolean;
+}
+
+/**
+ * Parses the shared CLI flags; exits on bad input. Output flags are accepted
+ * by every script; perf flags only where `perf: true` (never self.ts — that
+ * is the production-shaped deploy path).
+ */
+export function parseScriptFlags(
+  argv: readonly string[],
+  defaults: ScriptFlags,
+  usage: string,
+  options: ParseOptions,
+): ScriptFlags {
   let unsafeIo = defaults.unsafeIo;
   let tmpfs = defaults.tmpfs;
   let aptCache = defaults.aptCache;
+  let rich = defaults.rich;
+  let timing = defaults.timing;
+  let profile = defaults.profile;
   for (const arg of argv) {
-    if (arg === '--unsafe-io') {
+    if (arg === '--unsafe-io' && options.perf) {
       unsafeIo = true;
-    } else if (arg === '--no-unsafe-io') {
+    } else if (arg === '--no-unsafe-io' && options.perf) {
       unsafeIo = false;
-    } else if (arg === '--tmpfs') {
+    } else if (arg === '--tmpfs' && options.perf) {
       tmpfs = true;
-    } else if (arg === '--no-tmpfs') {
+    } else if (arg === '--no-tmpfs' && options.perf) {
       tmpfs = false;
-    } else if (arg === '--apt-cache') {
+    } else if (arg === '--apt-cache' && options.perf) {
       aptCache = true;
-    } else if (arg === '--no-apt-cache') {
+    } else if (arg === '--no-apt-cache' && options.perf) {
       aptCache = false;
+    } else if (arg === '--rich-output') {
+      rich = true;
+    } else if (arg === '--no-rich-output') {
+      rich = false;
+    } else if (arg === '--timing') {
+      timing = true;
+    } else if (arg === '--no-timing') {
+      timing = false;
+    } else if (arg === '--profile') {
+      profile = true;
+    } else if (arg === '--no-profile') {
+      profile = false;
     } else if (arg === '--help' || arg === '-h') {
       logger.log(usage);
       process.exit(0);
@@ -61,5 +146,17 @@ export function parsePerfFlags(argv: readonly string[], defaults: PerfFlags, usa
       process.exit(2);
     }
   }
-  return { unsafeIo, tmpfs, aptCache };
+  return { unsafeIo, tmpfs, aptCache, rich, timing, profile };
 }
+
+/** The shared "Output" section of every script's --help text. */
+export const OUTPUT_FLAG_USAGE: string = [
+  'Output:',
+  '  --rich-output / --no-rich-output  tasuku task list with live command output',
+  '                                    previews (default: on when stdout is a TTY,',
+  '                                    off when piped or running in CI)',
+  '  --timing / --no-timing            end-of-run timing breakdown (default: on in',
+  '                                    plain mode, off when rich)',
+  '  --profile / --no-profile          ansible tasks/roles profile recap (default:',
+  '                                    on in plain mode, off when rich)',
+].join('\n');

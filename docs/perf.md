@@ -61,14 +61,21 @@ npm run bench:apt                  # Ansible vs raw apt-get, twin fresh containe
   usage. These flags exist only on the throwaway-target scripts —
   `inttest:self` and production deploys always use the roles' stock,
   fsync-safe default.
-- Every phase of `inttest`/`inttest:self` is timed; a slowest-first table with
-  percentages is printed at the end of a run, pass or fail.
+- Every phase of `inttest`/`inttest:self`/`bench:apt` is timed; a slowest-first
+  table with percentages is printed at the end of a run, pass or fail (default
+  in plain mode; rich mode shows per-step times inline instead — toggle with
+  `--timing`/`--no-timing`).
 - Every `ansible-playbook` run enables `ansible.posix.profile_tasks` +
   `ansible.posix.profile_roles`; the per-task/per-role recap is printed after
-  the playbook finishes. On failure the full playbook output is retained at
+  the playbook finishes (default in plain mode, gated behind `--profile` in
+  rich mode). On failure the full playbook output is retained at
   `.run/<id>/ansible.log`.
+- On a TTY outside CI the scripts render a rich tasuku task list with live
+  command-output previews; piped/CI output stays the plain timestamped log.
+  Override with `--rich-output`/`--no-rich-output` (see `--help`).
 - `INTTEST_ANSIBLE_LIVE=1 npm run inttest` streams Ansible output live
-  instead of capturing it (demo mode).
+  instead of capturing it (demo mode; plain mode only — rich mode always
+  previews the playbook output).
 
 ## Full inttest breakdown (2026-11-19 baseline: PASS, 11m34.4s total)
 
@@ -216,15 +223,18 @@ cold-boot Liquibase slowness.
 
 - **Fastest full demo: `npm run inttest -- --tmpfs`** — the whole suite
   (deploy + HTTP + Keycloak credential assertions) finishes in **~1m6s**
-  with a warm apt cache and still ends with the phase breakdown and
-  per-task profile. The cache is built by any earlier run (`ensure:apt-cache`
-  + first inttest); after that the demo needs no network at all, so it
-  cannot be derailed by mirror weather on stage.
+  with a warm apt cache. On a terminal the run renders as a live task list
+  (step previews + per-step times); with `--no-rich-output` it ends with the
+  phase breakdown and per-task profile as before. The cache is built by any
+  earlier run (`ensure:apt-cache` + first inttest); after that the demo needs
+  no network at all, so it cannot be derailed by mirror weather on stage.
 - Show `npm run inttest` with `INTTEST_ANSIBLE_LIVE=1`: Ansible's output
   streams as it runs, and the per-task profile recap lands at the end of the
-  playbook — the "coffee timer" becomes a measured table.
-- The run always ends with the slowest-first phase breakdown, so the demo
-  closes on numbers even if something fails.
+  playbook — the "coffee timer" becomes a measured table. (Plain mode only;
+  rich mode always streams the playbook into its task preview.)
+- In plain mode the run always ends with the slowest-first phase breakdown,
+  so the demo closes on numbers even if something fails; in rich mode the
+  per-step times serve the same role (add `--timing` for the table too).
 - For a shorter demo path, `INTTEST_IDP=0 npm run inttest` skips the
   Keycloak/MySQL stack (the other multi-minute block).
 - `npm run bench:apt` answers "is Ansible the slow part?" with a table:

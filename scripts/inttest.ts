@@ -1,4 +1,4 @@
-import { execFileSync, execOrThrow } from './run.ts';
+import { execFile, execFileOrThrow } from './run.ts';
 import {
   ensureLxd,
   launchContainer,
@@ -14,6 +14,7 @@ import { probeAptCache } from './apt-cache.ts';
 import { createRunState, renderInventory, generateSshKey, type RunState } from './target.ts';
 import { runAnsiblePlaybook, printProfileRecap } from './ansible.ts';
 import { createStepTimer } from './timing.ts';
+import { createUi } from './ui.ts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as net from 'node:net';
@@ -21,7 +22,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { logger } from './logger.ts';
 import { TEST_USERS } from './test-users.ts';
-import { parsePerfFlags, DEFAULT_PERF_FLAGS, UNSAFE_IO_DPKG_OPTIONS } from './flags.ts';
+import {
+  parseScriptFlags,
+  DEFAULT_SCRIPT_FLAGS,
+  resolveOutputFlags,
+  OUTPUT_FLAG_USAGE,
+  UNSAFE_IO_DPKG_OPTIONS,
+} from './flags.ts';
 
 const FLAG_USAGE = [
   'Usage: npm run inttest -- [options]',
@@ -31,6 +38,8 @@ const FLAG_USAGE = [
   '  --tmpfs / --no-tmpfs          back the container rootfs with tmpfs (default: off)',
   '  --apt-cache / --no-apt-cache  use the local apt cache if one answers (default: on;',
   '                                falls back to direct mirror fetches when absent)',
+  '',
+  OUTPUT_FLAG_USAGE,
   '  --help',
 ].join('\n');
 
@@ -43,7 +52,11 @@ function randomPassword(): string {
   return randomBytes(18).toString('base64url');
 }
 
-async function waitForKeycloakReady(url: string, timeoutMs: number): Promise<void> {
+async function waitForKeycloakReady(
+  url: string,
+  timeoutMs: number,
+  onStatus?: (status: string) => void,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = 'unknown';
   while (Date.now() < deadline) {
@@ -56,6 +69,7 @@ async function waitForKeycloakReady(url: string, timeoutMs: number): Promise<voi
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
+    onStatus?.(lastError);
     const delay = Math.min(2000, Math.max(0, deadline - Date.now()));
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
@@ -132,44 +146,47 @@ async function openMysqlTunnel(state: RunState, ip: string): Promise<{
 }
 
 async function main(): Promise<void> {
-  const flags = parsePerfFlags(process.argv.slice(2), DEFAULT_PERF_FLAGS, FLAG_USAGE);
+  const flags = parseScriptFlags(process.argv.slice(2), DEFAULT_SCRIPT_FLAGS, FLAG_USAGE, { perf: true });
+  const output = resolveOutputFlags(flags);
+  const ui = createUi({ prefix: 'inttest', rich: output.rich });
   const state = createRunState('node-express-inttest');
   fs.mkdirSync(state.runDir, { recursive: true });
-  const timer = createStepTimer('inttest');
+  const timer = createStepTimer('inttest', ui);
 
   let created = false;
   let failed = false;
 
   try {
-    logger.log(`[inttest] run id ${state.id}`);
-    logger.log(`[inttest] flags: unsafe-io=${flags.unsafeIo ? 'on' : 'off'} tmpfs=${flags.tmpfs ? 'on' : 'off'}`);
+    ui.log(`[inttest] run id ${state.id}`);
+    ui.log(`[inttest] flags: unsafe-io=${flags.unsafeIo ? 'on' : 'off'} tmpfs=${flags.tmpfs ? 'on' : 'off'}`);
 
     await timer.run('ensure LXD', () => ensureLxd());
 
     const aptCacheUrl = flags.aptCache
       ? await timer.run('probe apt cache', () => probeAptCache())
       : null;
-    logger.log(
+    ui.log(
       `[inttest] apt cache: ${aptCacheUrl ?? (flags.aptCache ? 'unavailable, mirrors direct' : 'disabled by flag')}`,
     );
 
     const publicKey = await timer.run('generate SSH key', () => generateSshKey(state));
 
-    await timer.run(`launch container ${state.containerName}`, () => {
-      launchContainer(state.containerName, { tmpfs: flags.tmpfs });
-    });
+    await timer.run(`launch container ${state.containerName}`, (ctx) =>
+      launchContainer(state.containerName, { tmpfs: flags.tmpfs, preview: ctx.preview }));
     created = true;
 
-    await timer.run('wait for cloud-init', () => waitForCloudInit(state.containerName));
+    await timer.run('wait for cloud-init', (ctx) =>
+      waitForCloudInit(state.containerName, ctx.preview));
 
     await timer.run('configure target apt', () => configureTargetApt(state.containerName, aptCacheUrl));
 
     await timer.run('publish SSH key', () => publishPublicKey(state.containerName, publicKey));
 
     const ip = await timer.run('discover container IP', () => getContainerIpv4(state.containerName));
-    logger.log(`[inttest] container IP ${ip}`);
+    ui.log(`[inttest] container IP ${ip}`);
 
-    await timer.run('wait for SSH', () => waitForSsh(ip, state.keyPath));
+    await timer.run('wait for SSH', (ctx) =>
+      waitForSsh(ip, state.keyPath, (attempt) => ctx.setStatus(`attempt ${attempt}`)));
 
     await timer.run('render inventory', () => {
       fs.writeFileSync(state.inventoryPath, renderInventory(ip, state));
@@ -237,36 +254,42 @@ async function main(): Promise<void> {
 
     const extraVars = JSON.stringify(extraVarValues);
 
-    // INTTEST_ANSIBLE_LIVE=1 streams Ansible's output as it runs (nice for
-    // demos); default captures it, keeps the full log on failure, and prints
-    // just the per-task profile recap on success.
+    // Rich mode always streams Ansible into the task's live preview;
+    // INTTEST_ANSIBLE_LIVE=1 does the same for plain mode by inheriting the
+    // terminal. Otherwise the output is captured (full log in the run dir),
+    // with just the per-task profile recap printed on success.
     const liveAnsible = readEnv('INTTEST_ANSIBLE_LIVE', '0') === '1';
-    await timer.run('ansible-playbook site.yml', () => {
-      const result = runAnsiblePlaybook({
+    await timer.run('ansible-playbook site.yml', async (ctx) => {
+      const stream = liveAnsible && ctx.preview == null;
+      const result = await runAnsiblePlaybook({
         inventoryPath: state.inventoryPath,
         extraVars,
-        stream: liveAnsible,
-        logPath: liveAnsible ? undefined : path.join(state.runDir, 'ansible.log'),
+        stream,
+        preview: ctx.preview,
+        logPath: stream ? undefined : path.join(state.runDir, 'ansible.log'),
       });
-      if (!liveAnsible) {
-        printProfileRecap(result.stdout);
+      if (output.profile && !stream) {
+        printProfileRecap(result.stdout, ui.log);
       }
-    });
+    }, { previewLines: 8 });
 
     const appUrl = `http://${ip}:3000`;
-    logger.log(`[inttest] APP_URL=${appUrl}`);
+    ui.log(`[inttest] APP_URL=${appUrl}`);
 
-    await timer.run('HTTP assertions', () => {
-      const testResult = execFileSync('node', [path.join(process.cwd(), 'scripts', 'test-http-run.ts')], {
+    await timer.run('HTTP assertions', async (ctx) => {
+      const testResult = await execFile('node', [path.join(process.cwd(), 'scripts', 'test-http-run.ts')], {
         env: { ...process.env, APP_URL: appUrl },
         timeout: 300000,
+        preview: ctx.preview,
       });
-      process.stdout.write(testResult.stdout);
-      process.stderr.write(testResult.stderr);
+      if (ctx.preview == null) {
+        process.stdout.write(testResult.stdout);
+        process.stderr.write(testResult.stderr);
+      }
       if (testResult.status !== 0) {
         throw new Error('integration tests failed');
       }
-    });
+    }, { previewLines: 12 });
 
     if (idpContext != null) {
       const idp = idpContext;
@@ -276,8 +299,14 @@ async function main(): Promise<void> {
       // case that is real downtime, never come close.
       const readyTimeoutMs = Number(readEnv('KEYCLOAK_READY_TIMEOUT_MS', '600000'));
 
-      await timer.run('wait for Keycloak readiness', () =>
-        waitForKeycloakReady(`http://${ip}:9000/health/ready`, readyTimeoutMs));
+      await timer.run('wait for Keycloak readiness', (ctx) => {
+        ctx.setStatus(`timeout ${Math.round(readyTimeoutMs / 1000)}s`);
+        return waitForKeycloakReady(
+          `http://${ip}:9000/health/ready`,
+          readyTimeoutMs,
+          (status) => ctx.setStatus(status),
+        );
+      });
 
       const tunnel = await timer.run('open MySQL SSH tunnel', () => openMysqlTunnel(state, ip));
       try {
@@ -289,13 +318,14 @@ async function main(): Promise<void> {
           MYSQL_DATABASE: 'dc',
         };
 
-        await timer.run('seed test database', () =>
-          execOrThrow('node', [path.join(process.cwd(), 'scripts', 'seed-test-db.ts')], {
+        await timer.run('seed test database', (ctx) =>
+          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'seed-test-db.ts')], {
             env: { ...process.env, ...mysqlEnv, IMPORT_TEST_PASSWORDS: idp.testPasswordsJson },
+            preview: ctx.preview,
           }));
 
-        await timer.run('import users into Keycloak', () =>
-          execOrThrow('node', [path.join(process.cwd(), 'scripts', 'import-users.ts')], {
+        await timer.run('import users into Keycloak', (ctx) =>
+          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'import-users.ts')], {
             env: {
               ...process.env,
               ...mysqlEnv,
@@ -303,10 +333,11 @@ async function main(): Promise<void> {
               KC_ADMIN_USERNAME: 'kcadmin',
               KC_ADMIN_PASSWORD: idp.bootstrapPassword,
             },
+            preview: ctx.preview,
           }));
 
-        await timer.run('credential assertions', () => {
-          const credentialResult = execFileSync(
+        await timer.run('credential assertions', async (ctx) => {
+          const credentialResult = await execFile(
             'node',
             [path.join(process.cwd(), 'scripts', 'test-credentials-run.ts')],
             {
@@ -317,32 +348,35 @@ async function main(): Promise<void> {
                 IMPORT_TEST_PASSWORDS: idp.testPasswordsJson,
               },
               timeout: 300000,
+              preview: ctx.preview,
             },
           );
-          process.stdout.write(credentialResult.stdout);
-          process.stderr.write(credentialResult.stderr);
+          if (ctx.preview == null) {
+            process.stdout.write(credentialResult.stdout);
+            process.stderr.write(credentialResult.stderr);
+          }
           if (credentialResult.status !== 0) {
             throw new Error('credential tests failed');
           }
-        });
+        }, { previewLines: 12 });
       } finally {
         tunnel.process.kill();
       }
     }
 
-    logger.log('[inttest] PASS');
+    ui.log('[inttest] PASS');
   } catch (error) {
     failed = true;
     const message = error instanceof Error ? error.message : String(error);
-    logger.error(`[inttest] FAILED: ${message}`);
+    ui.error(`[inttest] FAILED: ${message}`);
     if (created) {
       try {
-        logger.error('[inttest] collecting container journal...');
-        const logs = readContainerLogs(state.containerName);
-        logger.error(logs);
+        ui.error('[inttest] collecting container journal...');
+        const logs = await readContainerLogs(state.containerName);
+        ui.error(logs);
       } catch (logError) {
         const logMessage = logError instanceof Error ? logError.message : String(logError);
-        logger.error(`[inttest] diagnostics failed: ${logMessage}`);
+        ui.error(`[inttest] diagnostics failed: ${logMessage}`);
       }
     }
     process.exitCode = 1;
@@ -352,16 +386,18 @@ async function main(): Promise<void> {
         await timer.run('destroy container', () => destroyContainer(state.containerName));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.error(`[inttest] destroy failed: ${message}`);
+        ui.error(`[inttest] destroy failed: ${message}`);
         process.exitCode = 1;
       }
     }
-    // Printed last so the breakdown is the final frame of a run, pass or fail.
-    logger.log(timer.report());
+    if (output.timing) {
+      // Printed last so the breakdown is the final frame of a run, pass or fail.
+      ui.log(timer.report());
+    }
     if (!failed) {
       fs.rmSync(state.runDir, { recursive: true, force: true });
     } else {
-      logger.error(`[inttest] run artifacts retained at ${state.runDir}`);
+      ui.error(`[inttest] run artifacts retained at ${state.runDir}`);
     }
   }
 }
