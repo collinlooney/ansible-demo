@@ -1,16 +1,16 @@
-import { execFile } from './run.ts';
-import { runAnsiblePlaybook, printProfileRecap } from './ansible.ts';
-import { createStepTimer } from './timing.ts';
-import { createUi } from './ui.ts';
+import { execFile } from './lib/run.ts';
+import { runAnsiblePlaybook, printProfileRecap } from './lib/ansible.ts';
+import { createStepTimer } from './lib/timing.ts';
+import { createUi } from './lib/ui.ts';
 import * as path from 'node:path';
 import { platform } from 'node:process';
-import { logger } from './logger.ts';
+import { logger } from './lib/logger.ts';
 import {
   parseScriptFlags,
   DEFAULT_SCRIPT_FLAGS,
   resolveOutputFlags,
   OUTPUT_FLAG_USAGE,
-} from './flags.ts';
+} from './lib/flags.ts';
 
 const FLAG_USAGE = [
   'Usage: npm run inttest:self -- [options]',
@@ -47,11 +47,15 @@ try {
 
   ui.log('[self] running tests');
   await timer.run('HTTP assertions', async (ctx) => {
-    const result = await execFile('node', [path.join(process.cwd(), 'scripts', 'test-http-run.ts')], {
-      env: { ...process.env, APP_URL: appUrl },
-      timeout: 120000,
-      preview: ctx.preview,
-    });
+    const result = await execFile(
+      'npx',
+      ['vitest', 'run', 'test/test-http.test.ts'],
+      {
+        env: { ...process.env, APP_URL: appUrl },
+        timeout: 120000,
+        preview: ctx.preview,
+      },
+    );
     if (ctx.preview == null) {
       process.stdout.write(result.stdout);
       process.stderr.write(result.stderr);

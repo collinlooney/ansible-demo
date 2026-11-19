@@ -7,8 +7,8 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import mysql from 'mysql2/promise';
 import type { RowDataPacket } from 'mysql2/promise';
-import { readMysqlConfig } from './mysql-config.ts';
-import { TEST_USERS } from './test-users.ts';
+import { readMysqlConfig } from '../scripts/lib/mysql-config.ts';
+import { TEST_USERS } from '../scripts/lib/test-users.ts';
 
 const baseUrl = (process.env.KEYCLOAK_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const realm = process.env.KC_REALM ?? 'digiclips';

@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync, execOrThrow } from './run.ts';
-import { getLxdBridgeIp } from './lxd.ts';
-import { probeAptCache } from './apt-cache.ts';
-import { logger } from './logger.ts';
+import { execFileSync, execOrThrow } from './lib/run.ts';
+import { getLxdBridgeIp } from './lib/lxd.ts';
+import { probeAptCache } from './lib/apt-cache.ts';
+import { logger } from './lib/logger.ts';
 
 /**
  * Host-side setup for the local apt cache (`npm run ensure:apt-cache`).

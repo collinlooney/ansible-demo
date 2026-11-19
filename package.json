@@ -9,7 +9,7 @@
     "inttest": "node scripts/inttest.ts",
     "inttest:self": "node scripts/self.ts",
     "bench:apt": "node scripts/bench-apt.ts",
-    "test:http": "node scripts/test-http-run.ts",
+    "test:http": "vitest run test/test-http.test.ts",
     "check:ts": "tsc --noEmit",
     "ensure:lxd": "node scripts/ensure-lxd.ts",
     "ensure:apt-cache": "node scripts/ensure-apt-cache.ts"

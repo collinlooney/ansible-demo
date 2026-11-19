@@ -1,14 +1,14 @@
 [Unit]
-Description={{ app_name }} (Node + Express)
+Description={{ app_name | systemd_env_escape }} (Node + Express)
 After=network.target
 
 [Service]
 Type=simple
-User={{ app_user }}
-Group={{ app_group }}
-WorkingDirectory={{ app_root }}
-EnvironmentFile={{ app_root }}/.env
-ExecStart={{ node_bin }} {{ app_root }}/server.js
+User={{ app_user | systemd_env_escape }}
+Group={{ app_group | systemd_env_escape }}
+WorkingDirectory={{ app_root | systemd_env_escape }}
+EnvironmentFile={{ app_root | systemd_env_escape }}/.env
+ExecStart={{ [node_bin, app_root ~ "/server.js"] | systemd_exec_escape }}
 Restart=on-failure
 RestartSec=5
 

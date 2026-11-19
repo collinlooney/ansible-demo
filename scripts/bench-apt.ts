@@ -1,4 +1,4 @@
-import { execFileOrThrow } from './run.ts';
+import { execFileOrThrow } from './lib/run.ts';
 import {
   ensureLxd,
   launchContainer,
@@ -8,10 +8,10 @@ import {
   waitForSsh,
   configureTargetApt,
   destroyContainer,
-} from './lxd.ts';
-import { probeAptCache } from './apt-cache.ts';
-import { createRunState, renderInventory, generateSshKey } from './target.ts';
-import { runAnsiblePlaybook, printProfileRecap, parseTaskTimes, getTaskTime } from './ansible.ts';
+} from './lib/lxd.ts';
+import { probeAptCache } from './lib/apt-cache.ts';
+import { createRunState, renderInventory, generateSshKey } from './lib/target.ts';
+import { runAnsiblePlaybook, printProfileRecap, parseTaskTimes, getTaskTime } from './lib/ansible.ts';
 import {
   parseScriptFlags,
   DEFAULT_SCRIPT_FLAGS,
@@ -20,10 +20,10 @@ import {
   STOCK_DPKG_OPTIONS,
   UNSAFE_IO_DPKG_OPTIONS,
   dpkgOptionArgs,
-} from './flags.ts';
-import { createStepTimer, formatDuration } from './timing.ts';
-import { createUi } from './ui.ts';
-import { logger } from './logger.ts';
+} from './lib/flags.ts';
+import { createStepTimer, formatDuration } from './lib/timing.ts';
+import { createUi } from './lib/ui.ts';
+import { logger } from './lib/logger.ts';
 import type { Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -268,28 +268,39 @@ async function main(): Promise<void> {
     ui.error(`[bench] FAILED: ${message}`);
     process.exitCode = 1;
   } finally {
+    const shouldTeardown =
+      output.teardownContainer === 'always' ||
+      (output.teardownContainer === 'on-success' && !failed);
     if (manualCreated) {
-      try {
-        await timer.run('destroy manual container', () => destroyContainer(manualName));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ui.error(`[bench] destroy manual failed: ${message}`);
-        process.exitCode = 1;
+      if (shouldTeardown) {
+        try {
+          await timer.run('destroy manual container', () => destroyContainer(manualName));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ui.error(`[bench] destroy manual failed: ${message}`);
+          process.exitCode = 1;
+        }
+      } else {
+        ui.error(`[bench] manual container retained at ${manualName}`);
       }
     }
     if (ansibleCreated) {
-      try {
-        await timer.run('destroy ansible container', () => destroyContainer(ansibleName));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ui.error(`[bench] destroy ansible failed: ${message}`);
-        process.exitCode = 1;
+      if (shouldTeardown) {
+        try {
+          await timer.run('destroy ansible container', () => destroyContainer(ansibleName));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ui.error(`[bench] destroy ansible failed: ${message}`);
+          process.exitCode = 1;
+        }
+      } else {
+        ui.error(`[bench] ansible container retained at ${ansibleName}`);
       }
     }
     if (output.timing) {
       ui.log(timer.report());
     }
-    if (!failed) {
+    if (shouldTeardown) {
       fs.rmSync(state.runDir, { recursive: true, force: true });
     } else {
       ui.error(`[bench] run artifacts retained at ${state.runDir}`);

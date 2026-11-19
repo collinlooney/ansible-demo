@@ -1,9 +1,9 @@
-import { execFileSync } from './run.ts';
-import { ensureLxd } from './lxd.ts';
-import { logger } from './logger.ts';
+import { execFileSync } from './lib/run.ts';
+import { ensureLxd } from './lib/lxd.ts';
+import { logger } from './lib/logger.ts';
 
 try {
-  ensureLxd();
+  await ensureLxd();
   const info = execFileSync('lxc', ['info'], {});
   logger.log(info.stdout.split('\n').slice(0, 12).join('\n'));
   logger.log('[ensure-lxd] OK');

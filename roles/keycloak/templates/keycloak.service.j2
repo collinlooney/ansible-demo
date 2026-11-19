@@ -1,13 +1,13 @@
 [Unit]
-Description=Keycloak {{ keycloak_version }} (identity provider)
-After={{ keycloak_after_units }}
+Description=Keycloak {{ keycloak_version | systemd_env_escape }} (identity provider)
+After={{ keycloak_after_units | systemd_env_escape }}
 
 [Service]
 Type=simple
-User={{ keycloak_user }}
-Group={{ keycloak_group }}
+User={{ keycloak_user | systemd_env_escape }}
+Group={{ keycloak_group | systemd_env_escape }}
 EnvironmentFile=/etc/keycloak.env
-ExecStart={{ keycloak_install_dir }}/bin/kc.sh start --optimized --import-realm
+ExecStart={{ [keycloak_install_dir ~ "/bin/kc.sh", "start", "--optimized", "--import-realm"] | systemd_exec_escape }}
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=600

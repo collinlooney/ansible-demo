@@ -1,7 +1,7 @@
 # {{ ansible_managed }}
 [mysqld]
-bind-address = {{ mysql_bind_address }}
-port = {{ mysql_port }}
+bind-address = "{{ mysql_bind_address | systemd_env_escape }}"
+port = "{{ mysql_port | systemd_env_escape }}"
 {% if mysql_enable_native_password | bool %}
 # community.mysql's password management hardcodes mysql_native_password for
 # MySQL >= 8 (module_utils/user.py), but MySQL 8.4 ships that plugin disabled

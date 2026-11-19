@@ -31,6 +31,13 @@ export interface OutputFlags {
   readonly timing?: boolean;
   /** Ansible tasks/roles profile recap. undefined = auto (plain: on, rich: off). */
   readonly profile?: boolean;
+  /**
+   * What to do with the LXC container and transient .run/ files after a run:
+   *  - always:    tear down unconditionally
+   *  - on-success: tear down only when the run passes (default)
+   *  - never:     keep container and .run/ files for diagnostics
+   */
+  readonly teardownContainer?: 'always' | 'on-success' | 'never';
 }
 
 export interface ScriptFlags extends PerfFlags, OutputFlags {}
@@ -38,7 +45,7 @@ export interface ScriptFlags extends PerfFlags, OutputFlags {}
 export const DEFAULT_PERF_FLAGS: PerfFlags = { unsafeIo: true, tmpfs: false, aptCache: true };
 /** Everything resolves from the environment: see resolveOutputFlags. */
 export const DEFAULT_OUTPUT_FLAGS: OutputFlags = {};
-export const DEFAULT_SCRIPT_FLAGS: ScriptFlags = { ...DEFAULT_PERF_FLAGS, ...DEFAULT_OUTPUT_FLAGS };
+export const DEFAULT_SCRIPT_FLAGS: ScriptFlags = { ...DEFAULT_PERF_FLAGS, ...DEFAULT_OUTPUT_FLAGS, teardownContainer: 'on-success' };
 
 /** Roles' stock dpkg options — the production-safe default. */
 export const STOCK_DPKG_OPTIONS = 'force-confdef,force-confold';
@@ -64,6 +71,7 @@ export interface ResolvedOutputFlags {
   readonly rich: boolean;
   readonly timing: boolean;
   readonly profile: boolean;
+  readonly teardownContainer: 'always' | 'on-success' | 'never';
 }
 
 /**
@@ -87,6 +95,7 @@ export function resolveOutputFlags(flags: OutputFlags): ResolvedOutputFlags {
     rich,
     timing: flags.timing ?? !rich,
     profile: flags.profile ?? !rich,
+    teardownContainer: flags.teardownContainer ?? 'on-success',
   };
 }
 
@@ -112,6 +121,7 @@ export function parseScriptFlags(
   let rich = defaults.rich;
   let timing = defaults.timing;
   let profile = defaults.profile;
+  let teardownContainer = defaults.teardownContainer;
   for (const arg of argv) {
     if (arg === '--unsafe-io' && options.perf) {
       unsafeIo = true;
@@ -137,6 +147,15 @@ export function parseScriptFlags(
       profile = true;
     } else if (arg === '--no-profile') {
       profile = false;
+    } else if (arg.startsWith('--teardown-container=')) {
+      const value = arg.slice('--teardown-container='.length);
+      if (value === 'always' || value === 'on-success' || value === 'never') {
+        teardownContainer = value;
+      } else {
+        logger.error(`invalid --teardown-container value: ${value} (expected always, on-success, or never)`);
+        logger.error(usage);
+        process.exit(2);
+      }
     } else if (arg === '--help' || arg === '-h') {
       logger.log(usage);
       process.exit(0);
@@ -146,7 +165,7 @@ export function parseScriptFlags(
       process.exit(2);
     }
   }
-  return { unsafeIo, tmpfs, aptCache, rich, timing, profile };
+  return { unsafeIo, tmpfs, aptCache, rich, timing, profile, teardownContainer };
 }
 
 /** The shared "Output" section of every script's --help text. */
@@ -159,4 +178,7 @@ export const OUTPUT_FLAG_USAGE: string = [
   '                                    plain mode, off when rich)',
   '  --profile / --no-profile          ansible tasks/roles profile recap (default:',
   '                                    on in plain mode, off when rich)',
+  '  --teardown-container=always       always tear down the container and .run/ files',
+  '  --teardown-container=on-success   tear down only when the run passes (default)',
+  '  --teardown-container=never        keep container and .run/ files for diagnostics',
 ].join('\n');

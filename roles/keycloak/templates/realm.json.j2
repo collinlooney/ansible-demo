@@ -1,7 +1,7 @@
 {
-  "realm": "{{ keycloak_realm }}",
+  "realm": {{ keycloak_realm | tojson }},
   "enabled": true,
-  "sslRequired": "{{ keycloak_ssl_required }}",
+  "sslRequired": {{ keycloak_ssl_required | tojson }},
   "registrationAllowed": {{ 'true' if keycloak_registration_allowed | bool else 'false' }},
   "resetPasswordAllowed": true,
   "bruteForceProtected": true,

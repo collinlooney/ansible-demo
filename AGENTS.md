@@ -24,23 +24,27 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - `app/` Express source.
 - `playbooks/site.yml`.
 - `roles/` (`mysql` + `keycloak` gated by `mysql_enabled`/`keycloak_enabled`).
-- `scripts/run.ts` subprocess helper (sync `execFileSync` for quick queries; async `execFile`/`execFileOrThrow` with a `preview` sink for anything long-running — rich mode's spinner must not be blocked by spawnSync).
-- `scripts/ui.ts` presentation layer: rich mode = tasuku task list with `streamPreview` + per-step times; plain mode = the old timestamped logger (rich only when `stdout.isTTY && !CI` — cursor redraws are garbage in a pipe, so agents and CI always get plain output).
-- `scripts/flags.ts` shared CLI flags: perf flags (`--unsafe-io`/`--tmpfs`/`--apt-cache`, throwaway scripts only) and output flags (`--rich-output`/`--timing`/`--profile` + negations; auto-resolve: rich = TTY && !CI, timing/profile = on in plain, off in rich).
-- `scripts/lxd.ts` container lifecycle + target-side apt config (proxy/retries injection).
-- `scripts/apt-cache.ts` local apt-cacher-ng probe (auto-detect; absent = direct mirrors).
-- `scripts/ensure-apt-cache.ts` host-side cache setup (`npm run ensure:apt-cache`, optional; preferred mirrors from local `.apt-cache-mirrors`/`APT_CACHE_MIRRORS` — never hardcoded in the repo).
-- `scripts/inttest.ts` one-click flow.
-- `scripts/target.ts` per-run state: `.run/<id>` dir, SSH key, inventory rendering.
-- `scripts/timing.ts` step timer; owns the plain-mode `> step` / `< step (dur)` lines and the gated slowest-first breakdown (`--timing`).
-- `scripts/ansible.ts` profiled `ansible-playbook` invocation (profile_tasks/profile_roles) + recap parsing.
-- `scripts/bench-apt.ts` apt benchmark: roles' `apt`-tagged tasks vs raw apt-get (`npm run bench:apt`).
-- `scripts/test-http.ts` HTTP assertions using `APP_URL`.
-- `scripts/test-credentials.ts` Keycloak login assertions (seed -> import -> login).
-- `scripts/seed-test-db.ts` writes dump-shaped fixtures; `scripts/import-users.ts` imports them into Keycloak.
-- `scripts/keycloak-admin.ts` minimal Admin API client; `scripts/mysql-config.ts` shared MySQL env config.
-- `scripts/test-users.ts` shared user fixtures for the credential inttest.
-- `scripts/self.ts` target-host deploy (Linux only).
+- `filter_plugins/` Jinja2 filters for template escaping (`systemd_env_escape`, `systemd_exec_escape`).
+- `scripts/lib/` library modules (not directly invoked by users):
+  - `run.ts` subprocess helper (sync `execFileSync` for quick queries; async `execFile`/`execFileOrThrow` with a `preview` sink for anything long-running — rich mode's spinner must not be blocked by spawnSync).
+  - `ui.ts` presentation layer: rich mode = tasuku task list with `streamPreview` + per-step times; plain mode = the old timestamped logger (rich only when `stdout.isTTY && !CI` — cursor redraws are garbage in a pipe, so agents and CI always get plain output).
+  - `flags.ts` shared CLI flags: perf flags (`--unsafe-io`/`--tmpfs`/`--apt-cache`, throwaway scripts only) and output flags (`--rich-output`/`--timing`/`--profile`/`--teardown-container=` + negations; auto-resolve: rich = TTY && !CI, timing/profile = on in plain, off in rich).
+  - `lxd.ts` container lifecycle + target-side apt config (proxy/retries injection).
+  - `apt-cache.ts` local apt-cacher-ng probe (auto-detect; absent = direct mirrors).
+  - `ensure-apt-cache.ts` host-side cache setup (`npm run ensure:apt-cache`, optional; preferred mirrors from local `.apt-cache-mirrors`/`APT_CACHE_MIRRORS` — never hardcoded in the repo).
+  - `target.ts` per-run state: `.run/<id>` dir, SSH key, inventory rendering.
+  - `timing.ts` step timer; owns the plain-mode `> step` / `< step (dur)` lines and the gated slowest-first breakdown (`--timing`).
+  - `ansible.ts` profiled `ansible-playbook` invocation (profile_tasks/profile_roles) + recap parsing.
+  - `import-users.ts` imports seed fixtures into Keycloak.
+  - `seed-test-db.ts` writes dump-shaped fixtures into MySQL.
+  - `keycloak-admin.ts` minimal Admin API client; `mysql-config.ts` shared MySQL env config; `test-users.ts` shared user fixtures for the credential inttest; `logger.ts` timestamped logger.
+- `scripts/inttest.ts` one-click flow (top-level, entry point).
+- `scripts/bench-apt.ts` apt benchmark: roles' `apt`-tagged tasks vs raw apt-get (`npm run bench:apt`) (top-level, entry point).
+- `scripts/self.ts` target-host deploy (Linux only) (top-level, entry point).
+- `scripts/ensure-lxd.ts` LXD setup (`npm run ensure:lxd`) (top-level, entry point).
+- `test/` Vitest suites (invoked via `npx vitest run`, not wrapper scripts):
+  - `test-http.test.ts` HTTP assertions using `APP_URL`.
+  - `test-credentials.test.ts` Keycloak login assertions (seed -> import -> login).
 - `.run/` generated per test and gitignored.
 - `inventories/lxc/` base vars (hosts.ini generated per run).
 

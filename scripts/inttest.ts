@@ -1,4 +1,4 @@
-import { execFile, execFileOrThrow } from './run.ts';
+import { execFile, execFileOrThrow } from './lib/run.ts';
 import {
   ensureLxd,
   launchContainer,
@@ -9,26 +9,26 @@ import {
   readContainerLogs,
   configureTargetApt,
   destroyContainer,
-} from './lxd.ts';
-import { probeAptCache } from './apt-cache.ts';
-import { createRunState, renderInventory, generateSshKey, type RunState } from './target.ts';
-import { runAnsiblePlaybook, printProfileRecap } from './ansible.ts';
-import { createStepTimer } from './timing.ts';
-import { createUi } from './ui.ts';
+} from './lib/lxd.ts';
+import { probeAptCache } from './lib/apt-cache.ts';
+import { createRunState, renderInventory, generateSshKey, type RunState } from './lib/target.ts';
+import { runAnsiblePlaybook, printProfileRecap } from './lib/ansible.ts';
+import { createStepTimer } from './lib/timing.ts';
+import { createUi } from './lib/ui.ts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as net from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { logger } from './logger.ts';
-import { TEST_USERS } from './test-users.ts';
+import { logger } from './lib/logger.ts';
+import { TEST_USERS } from './lib/test-users.ts';
 import {
   parseScriptFlags,
   DEFAULT_SCRIPT_FLAGS,
   resolveOutputFlags,
   OUTPUT_FLAG_USAGE,
   UNSAFE_IO_DPKG_OPTIONS,
-} from './flags.ts';
+} from './lib/flags.ts';
 
 const FLAG_USAGE = [
   'Usage: npm run inttest -- [options]',
@@ -277,11 +277,15 @@ async function main(): Promise<void> {
     ui.log(`[inttest] APP_URL=${appUrl}`);
 
     await timer.run('HTTP assertions', async (ctx) => {
-      const testResult = await execFile('node', [path.join(process.cwd(), 'scripts', 'test-http-run.ts')], {
-        env: { ...process.env, APP_URL: appUrl },
-        timeout: 300000,
-        preview: ctx.preview,
-      });
+      const testResult = await execFile(
+        'npx',
+        ['vitest', 'run', 'test/test-http.test.ts'],
+        {
+          env: { ...process.env, APP_URL: appUrl },
+          timeout: 300000,
+          preview: ctx.preview,
+        },
+      );
       if (ctx.preview == null) {
         process.stdout.write(testResult.stdout);
         process.stderr.write(testResult.stderr);
@@ -319,13 +323,13 @@ async function main(): Promise<void> {
         };
 
         await timer.run('seed test database', (ctx) =>
-          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'seed-test-db.ts')], {
+          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'lib', 'seed-test-db.ts')], {
             env: { ...process.env, ...mysqlEnv, IMPORT_TEST_PASSWORDS: idp.testPasswordsJson },
             preview: ctx.preview,
           }));
 
         await timer.run('import users into Keycloak', (ctx) =>
-          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'import-users.ts')], {
+          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'lib', 'import-users.ts')], {
             env: {
               ...process.env,
               ...mysqlEnv,
@@ -338,8 +342,8 @@ async function main(): Promise<void> {
 
         await timer.run('credential assertions', async (ctx) => {
           const credentialResult = await execFile(
-            'node',
-            [path.join(process.cwd(), 'scripts', 'test-credentials-run.ts')],
+            'npx',
+            ['vitest', 'run', 'test/test-credentials.test.ts'],
             {
               env: {
                 ...process.env,
@@ -381,20 +385,27 @@ async function main(): Promise<void> {
     }
     process.exitCode = 1;
   } finally {
+    const shouldTeardown =
+      output.teardownContainer === 'always' ||
+      (output.teardownContainer === 'on-success' && !failed);
     if (created) {
-      try {
-        await timer.run('destroy container', () => destroyContainer(state.containerName));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ui.error(`[inttest] destroy failed: ${message}`);
-        process.exitCode = 1;
+      if (shouldTeardown) {
+        try {
+          await timer.run('destroy container', () => destroyContainer(state.containerName));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ui.error(`[inttest] destroy failed: ${message}`);
+          process.exitCode = 1;
+        }
+      } else {
+        ui.error(`[inttest] container retained at ${state.containerName}`);
       }
     }
     if (output.timing) {
       // Printed last so the breakdown is the final frame of a run, pass or fail.
       ui.log(timer.report());
     }
-    if (!failed) {
+    if (shouldTeardown) {
       fs.rmSync(state.runDir, { recursive: true, force: true });
     } else {
       ui.error(`[inttest] run artifacts retained at ${state.runDir}`);
