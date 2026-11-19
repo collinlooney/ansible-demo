@@ -23,8 +23,65 @@ export function ensureLxd(): void {
   }
 }
 
-export function launchContainer(name: string): void {
-  execOrThrow('lxc', ['launch', 'ubuntu:26.04', name], { timeout: 300000 });
+const TMPFS_POOL = 'tmpfs';
+const TMPFS_MOUNT_POINT = '/var/tmp/ansible-demo-tmpfs';
+
+/**
+ * Prep the optional tmpfs backing for throwaway targets (flag: --tmpfs).
+ * Mounts a ramdisk on the host and creates a LXD dir pool on it, so the
+ * container's whole rootfs lives in RAM: dpkg unpack and MySQL/Liquibase
+ * fsyncs become memory operations instead of disk syncs (docs/perf.md).
+ * Default tmpfs size is the kernel's (half of RAM); set LXC_TMPFS_SIZE
+ * (e.g. "4G") to cap it. Idempotent — the mount and pool are left in place
+ * after runs for reuse and cost no RAM while idle.
+ */
+export function ensureTmpfsPool(): void {
+  const mount = execFileSync('findmnt', ['-n', '-o', 'FSTYPE', '-M', TMPFS_MOUNT_POINT], {});
+  if (mount.status === 0) {
+    if (mount.stdout.trim() !== 'tmpfs') {
+      throw new Error(
+        `${TMPFS_MOUNT_POINT} is a mountpoint but not tmpfs (${mount.stdout.trim()}); refusing to shadow it`,
+      );
+    }
+  } else {
+    execOrThrow('sudo', ['mkdir', '-p', TMPFS_MOUNT_POINT], {});
+    const size = process.env.LXC_TMPFS_SIZE;
+    const mountArgs = ['mount', '-t', 'tmpfs'];
+    if (size != null && size !== '') {
+      mountArgs.push('-o', `size=${size}`);
+    }
+    execOrThrow('sudo', [...mountArgs, 'tmpfs', TMPFS_MOUNT_POINT], {});
+    logger.log(`[lxd] mounted tmpfs at ${TMPFS_MOUNT_POINT}${size != null && size !== '' ? ` (size=${size})` : ''}`);
+  }
+
+  const source = execFileSync('lxc', ['storage', 'get', TMPFS_POOL, 'source'], {});
+  if (source.status === 0) {
+    const existing = source.stdout.trim();
+    if (existing !== TMPFS_MOUNT_POINT) {
+      throw new Error(
+        `storage pool '${TMPFS_POOL}' exists but is not sourced at ${TMPFS_MOUNT_POINT} ` +
+          `(got '${existing || '(default)'}'); remove or rename it`,
+      );
+    }
+    return;
+  }
+  execOrThrow('lxc', ['storage', 'create', TMPFS_POOL, 'dir', `source=${TMPFS_MOUNT_POINT}`], { timeout: 60000 });
+  logger.log(`[lxd] storage pool '${TMPFS_POOL}' created on ${TMPFS_MOUNT_POINT}`);
+}
+
+export interface LaunchOptions {
+  /** Back the container's rootfs with tmpfs (see ensureTmpfsPool). */
+  readonly tmpfs?: boolean;
+}
+
+export function launchContainer(name: string, options: LaunchOptions = {}): void {
+  const args = ['launch', 'ubuntu:26.04', name];
+  if (options.tmpfs === true) {
+    ensureTmpfsPool();
+    args.push('-s', TMPFS_POOL);
+    logger.log(`[lxd] ${name}: rootfs on tmpfs pool '${TMPFS_POOL}'`);
+  }
+  execOrThrow('lxc', args, { timeout: 300000 });
 }
 
 export function waitForCloudInit(name: string): void {

@@ -5,6 +5,7 @@
       - mysql-server
       - python3-pymysql
     state: present
+    dpkg_options: "{{ apt_dpkg_options }}"
   environment:
     DEBIAN_FRONTEND: noninteractive
   tags: [apt]

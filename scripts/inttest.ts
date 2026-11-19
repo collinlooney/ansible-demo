@@ -19,6 +19,16 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { logger } from './logger.ts';
 import { TEST_USERS } from './test-users.ts';
+import { parsePerfFlags, DEFAULT_PERF_FLAGS, UNSAFE_IO_DPKG_OPTIONS } from './flags.ts';
+
+const FLAG_USAGE = [
+  'Usage: npm run inttest -- [options]',
+  '',
+  'Throwaway-target optimizations (never used by self.ts / production):',
+  '  --unsafe-io / --no-unsafe-io  dpkg --force-unsafe-io during apt installs (default: on)',
+  '  --tmpfs / --no-tmpfs          back the container rootfs with tmpfs (default: off)',
+  '  --help',
+].join('\n');
 
 function readEnv(name: string, defaultValue: string): string {
   const value = process.env[name];
@@ -118,6 +128,7 @@ async function openMysqlTunnel(state: RunState, ip: string): Promise<{
 }
 
 async function main(): Promise<void> {
+  const flags = parsePerfFlags(process.argv.slice(2), DEFAULT_PERF_FLAGS, FLAG_USAGE);
   const state = createRunState('node-express-inttest');
   fs.mkdirSync(state.runDir, { recursive: true });
   const timer = createStepTimer('inttest');
@@ -127,13 +138,14 @@ async function main(): Promise<void> {
 
   try {
     logger.log(`[inttest] run id ${state.id}`);
+    logger.log(`[inttest] flags: unsafe-io=${flags.unsafeIo ? 'on' : 'off'} tmpfs=${flags.tmpfs ? 'on' : 'off'}`);
 
     await timer.run('ensure LXD', () => ensureLxd());
 
     const publicKey = await timer.run('generate SSH key', () => generateSshKey(state));
 
     await timer.run(`launch container ${state.containerName}`, () => {
-      launchContainer(state.containerName);
+      launchContainer(state.containerName, { tmpfs: flags.tmpfs });
     });
     created = true;
 
@@ -158,6 +170,12 @@ async function main(): Promise<void> {
       app_port: 3000,
       app_log_level: readEnv('APP_LOG_LEVEL', 'info'),
     };
+
+    // Throwaway target: skip dpkg's per-file fsync during unpack (roles keep
+    // the stock, production-safe default; only these scripts opt in).
+    if (flags.unsafeIo) {
+      extraVarValues.apt_dpkg_options = UNSAFE_IO_DPKG_OPTIONS;
+    }
 
     // Per-run IdP stack: MySQL (test datastore) + Keycloak, with generated
     // secrets that never outlive this run.

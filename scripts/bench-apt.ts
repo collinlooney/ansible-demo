@@ -10,6 +10,13 @@ import {
 } from './lxd.ts';
 import { createRunState, renderInventory, generateSshKey } from './target.ts';
 import { runAnsiblePlaybook, printProfileRecap, parseTaskTimes, getTaskTime } from './ansible.ts';
+import {
+  parsePerfFlags,
+  DEFAULT_PERF_FLAGS,
+  STOCK_DPKG_OPTIONS,
+  UNSAFE_IO_DPKG_OPTIONS,
+  dpkgOptionArgs,
+} from './flags.ts';
 import { createStepTimer, formatDuration } from './timing.ts';
 import { logger } from './logger.ts';
 import * as fs from 'node:fs';
@@ -26,7 +33,18 @@ import * as path from 'node:path';
  *
  * The delta is what Ansible's per-task machinery costs (SSH + module +
  * python-apt) over raw apt on the same boxes.
+ *
+ * Takes the same throwaway-target flags as inttest (--unsafe-io, --tmpfs);
+ * both sides always run with identical dpkg options.
  */
+const FLAG_USAGE = [
+  'Usage: npm run bench:apt -- [options]',
+  '',
+  'Throwaway-target optimizations (mirrored on both sides of the comparison):',
+  '  --unsafe-io / --no-unsafe-io  dpkg --force-unsafe-io during apt installs (default: on)',
+  '  --tmpfs / --no-tmpfs          back the containers rootfs with tmpfs (default: off)',
+  '  --help',
+].join('\n');
 interface AptOp {
   readonly label: string;
   /** Task name in the roles (tagged `apt`), as profile_tasks reports it. */
@@ -35,33 +53,38 @@ interface AptOp {
   readonly aptArgs: readonly string[];
 }
 
-const APT_OPS: readonly AptOp[] = [
-  {
-    label: 'refresh apt cache',
-    taskName: 'Update apt cache',
-    aptArgs: ['update'],
-  },
-  {
-    label: 'install ca-certificates curl',
-    taskName: 'Install base packages',
-    aptArgs: ['install', '-y', 'ca-certificates', 'curl'],
-  },
-  {
-    label: 'install nodejs npm (--no-install-recommends)',
-    taskName: 'Install Node.js and npm from Ubuntu packages',
-    aptArgs: ['install', '-y', '--no-install-recommends', 'nodejs', 'npm'],
-  },
-  {
-    label: 'install mysql-server python3-pymysql',
-    taskName: 'Install MySQL server and Python driver',
-    aptArgs: ['install', '-y', 'mysql-server', 'python3-pymysql'],
-  },
-  {
-    label: 'install openjdk-21-jre-headless',
-    taskName: 'Install OpenJDK 21 runtime',
-    aptArgs: ['install', '-y', 'openjdk-21-jre-headless'],
-  },
-];
+// Both sides get identical dpkg options (flag-selected, mirroring what the
+// inttest deploys with) — the delta stays "what Ansible costs", never
+// "what --force-unsafe-io costs" (that A/B lives in docs/perf.md).
+function buildAptOps(dpkgOptions: string): readonly AptOp[] {
+  return [
+    {
+      label: 'refresh apt cache',
+      taskName: 'Update apt cache',
+      aptArgs: ['update'],
+    },
+    {
+      label: 'install ca-certificates curl',
+      taskName: 'Install base packages',
+      aptArgs: ['install', '-y', ...dpkgOptionArgs(dpkgOptions), 'ca-certificates', 'curl'],
+    },
+    {
+      label: 'install nodejs npm (--no-install-recommends)',
+      taskName: 'Install Node.js and npm from Ubuntu packages',
+      aptArgs: ['install', '-y', '--no-install-recommends', ...dpkgOptionArgs(dpkgOptions), 'nodejs', 'npm'],
+    },
+    {
+      label: 'install mysql-server python3-pymysql',
+      taskName: 'Install MySQL server and Python driver',
+      aptArgs: ['install', '-y', ...dpkgOptionArgs(dpkgOptions), 'mysql-server', 'python3-pymysql'],
+    },
+    {
+      label: 'install openjdk-21-jre-headless',
+      taskName: 'Install OpenJDK 21 runtime',
+      aptArgs: ['install', '-y', ...dpkgOptionArgs(dpkgOptions), 'openjdk-21-jre-headless'],
+    },
+  ];
+}
 
 interface ManualResult {
   readonly ms: number;
@@ -102,12 +125,16 @@ function writeBenchPlaybook(stateRunDir: string): string {
   return playbookPath;
 }
 
-function printComparison(taskTimes: Map<string, number>, manual: Map<string, ManualResult>): void {
-  const labelWidth = Math.max(...APT_OPS.map((op) => op.label.length));
+function printComparison(
+  ops: readonly AptOp[],
+  taskTimes: Map<string, number>,
+  manual: Map<string, ManualResult>,
+): void {
+  const labelWidth = Math.max(...ops.map((op) => op.label.length));
   logger.log(`[bench] ${'operation'.padEnd(labelWidth)}  ${'ansible'.padStart(9)}  ${'manual'.padStart(9)}  ${'delta'.padStart(9)}`);
   let ansibleTotal = 0;
   let manualTotal = 0;
-  for (const op of APT_OPS) {
+  for (const op of ops) {
     const ansibleMs = getTaskTime(taskTimes, op.taskName);
     const manualMs = manual.get(op.taskName)?.ms;
     const ansibleCell = ansibleMs == null ? 'n/a' : formatDuration(ansibleMs);
@@ -126,7 +153,7 @@ function printComparison(taskTimes: Map<string, number>, manual: Map<string, Man
   logger.log(
     `[bench] ${'task total'.padEnd(labelWidth)}  ${formatDuration(ansibleTotal).padStart(9)}  ${formatDuration(manualTotal).padStart(9)}`,
   );
-  for (const op of APT_OPS) {
+  for (const op of ops) {
     const summary = manual.get(op.taskName)?.summary ?? [];
     if (summary.length > 0) {
       logger.log(`[bench]   ${op.label}: ${summary.join(' | ')}`);
@@ -135,6 +162,9 @@ function printComparison(taskTimes: Map<string, number>, manual: Map<string, Man
 }
 
 async function main(): Promise<void> {
+  const flags = parsePerfFlags(process.argv.slice(2), DEFAULT_PERF_FLAGS, FLAG_USAGE);
+  const dpkgOptions = flags.unsafeIo ? UNSAFE_IO_DPKG_OPTIONS : STOCK_DPKG_OPTIONS;
+  const aptOps = buildAptOps(dpkgOptions);
   const state = createRunState('node-express-bench');
   fs.mkdirSync(state.runDir, { recursive: true });
   const timer = createStepTimer('bench');
@@ -147,26 +177,27 @@ async function main(): Promise<void> {
 
   try {
     logger.log(`[bench] run id ${state.id}`);
+    logger.log(`[bench] flags: unsafe-io=${flags.unsafeIo ? 'on' : 'off'} tmpfs=${flags.tmpfs ? 'on' : 'off'} (dpkg: ${dpkgOptions})`);
 
     await timer.run('ensure LXD', () => ensureLxd());
 
     const manualTimes = new Map<string, ManualResult>();
 
     await timer.run(`launch manual container ${manualName}`, () => {
-      launchContainer(manualName);
+      launchContainer(manualName, { tmpfs: flags.tmpfs });
     });
     manualCreated = true;
     await timer.run('wait for cloud-init (manual)', () => waitForCloudInit(manualName));
 
     logger.log('[bench] phase 1/2: raw apt-get via lxc exec');
-    for (const op of APT_OPS) {
+    for (const op of aptOps) {
       const result = await timer.run(`manual: ${op.label}`, () => runManualOp(manualName, op));
       manualTimes.set(op.taskName, result);
     }
 
     const publicKey = await timer.run('generate SSH key', () => generateSshKey(state));
     await timer.run(`launch ansible container ${ansibleName}`, () => {
-      launchContainer(ansibleName);
+      launchContainer(ansibleName, { tmpfs: flags.tmpfs });
     });
     ansibleCreated = true;
     await timer.run('wait for cloud-init (ansible)', () => waitForCloudInit(ansibleName));
@@ -183,13 +214,14 @@ async function main(): Promise<void> {
       runAnsiblePlaybook({
         inventoryPath: state.inventoryPath,
         playbookPath,
+        extraVars: JSON.stringify({ apt_dpkg_options: dpkgOptions }),
         extraArgs: ['--tags', 'apt'],
         logPath: path.join(state.runDir, 'ansible.log'),
       }));
 
     const taskTimes = parseTaskTimes(ansibleResult.stdout);
     printProfileRecap(ansibleResult.stdout);
-    printComparison(taskTimes, manualTimes);
+    printComparison(aptOps, taskTimes, manualTimes);
 
     const wallMs = timer.records.find((record) => record.name.startsWith('ansible-playbook'))?.ms ?? 0;
     const taskSumMs = [...taskTimes.values()].reduce((sum, ms) => sum + ms, 0);

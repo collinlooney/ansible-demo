@@ -6,6 +6,7 @@
       - npm
     state: present
     install_recommends: false
+    dpkg_options: "{{ apt_dpkg_options }}"
   environment:
     DEBIAN_FRONTEND: noninteractive
   tags: [apt]

@@ -16,6 +16,7 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - Preserve `.run/<id>` on failure for diagnostics; clean on success.
 - Generated host entry point must use the discovered container IP, never hard-code IPs.
 - Scripts must remain erasable TypeScript: no enums, no parameter properties, `import type` where appropriate, no emit.
+- Speed optimizations are inttest-only opt-ins: roles' `apt_dpkg_options` defaults to stock dpkg behavior (fsync-safe), and only `scripts/inttest.ts`/`scripts/bench-apt.ts` pass `--force-unsafe-io` (flag `--unsafe-io`, default on) or use tmpfs-backed targets (flag `--tmpfs`, default off). `inttest:self` and production deploys never take these flags.
 
 ## Repo map
 

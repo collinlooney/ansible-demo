@@ -61,6 +61,10 @@ Without act, `npm run inttest` runs the same steps the integration job runs.
 - Every `ansible-playbook` invocation enables `ansible.posix.profile_tasks` + `ansible.posix.profile_roles`, so runs end with a per-task/per-role timing table. On failure the full playbook output is retained at `.run/<id>/ansible.log`.
 - `INTTEST_ANSIBLE_LIVE=1 npm run inttest` streams Ansible output as it runs (demo mode) instead of capturing it.
 - `npm run bench:apt` benchmarks the roles' `apt`-tagged tasks against the equivalent raw `apt-get` commands on a second, identical fresh container and prints a side-by-side comparison.
+- `inttest` and `bench:apt` take throwaway-target speed flags (see `--help`):
+  - `--unsafe-io` / `--no-unsafe-io` — pass dpkg `--force-unsafe-io` during apt installs. **Default on for these scripts only**; the roles' `apt_dpkg_options` default stays stock, so `inttest:self` and production deploys always get fsync-safe installs.
+  - `--tmpfs` / `--no-tmpfs` — back the container's whole rootfs with a host-mounted tmpfs (dpkg/Liquibase/MySQL fsyncs become memory operations). Default off; needs RAM headroom (default cap = half of RAM, override with `LXC_TMPFS_SIZE=4G`).
+- Measured end to end: baseline **11m34s** → default flags (`--unsafe-io`) **6m55s** → `npm run inttest -- --tmpfs` **1m20s** (see [`docs/perf.md`](docs/perf.md)).
 
 Measured findings and how to reproduce them: [`docs/perf.md`](docs/perf.md).
 

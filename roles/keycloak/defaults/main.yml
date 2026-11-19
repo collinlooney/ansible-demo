@@ -1,5 +1,15 @@
 ---
 # Keycloak IdP — official tarball distribution (bare metal), MySQL datastore.
+
+# dpkg options for apt installs (ansible.builtin.apt's own dpkg_options).
+# Format: comma-separated, no leading dashes — the module adds "--" itself
+# (expand_dpkg_options in ansible/modules/apt.py). Stock behavior: per-file
+# fsync during unpack — the production-safe default. The inttest scripts opt
+# into force-unsafe-io via --extra-vars (their flag defaults to on; see
+# scripts/flags.ts). Measured ~4.3min off a 360-package install on btrfs —
+# docs/perf.md.
+apt_dpkg_options: 'force-confdef,force-confold'
+
 keycloak_version: '26.8.2'
 keycloak_sha1: '7918de2786c7db466152128bea350becbd40a58f'
 keycloak_download_url: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"

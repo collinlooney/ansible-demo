@@ -1,0 +1,9 @@
+---
+# dpkg options for apt installs (ansible.builtin.apt's own dpkg_options).
+# Format: comma-separated, no leading dashes — the module adds "--" itself
+# (expand_dpkg_options in ansible/modules/apt.py). Stock behavior: per-file
+# fsync during unpack — the production-safe default. The inttest scripts opt
+# into force-unsafe-io via --extra-vars (their flag defaults to on; see
+# scripts/flags.ts). Measured ~4.3min off a 360-package install on btrfs —
+# docs/perf.md.
+apt_dpkg_options: 'force-confdef,force-confold'
