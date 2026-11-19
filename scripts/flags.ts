@@ -13,9 +13,11 @@ export interface PerfFlags {
   readonly unsafeIo: boolean;
   /** Back the target container's rootfs with tmpfs (default: off). */
   readonly tmpfs: boolean;
+  /** Use the local apt-cacher-ng when one answers (default: on; falls back to direct). */
+  readonly aptCache: boolean;
 }
 
-export const DEFAULT_PERF_FLAGS: PerfFlags = { unsafeIo: true, tmpfs: false };
+export const DEFAULT_PERF_FLAGS: PerfFlags = { unsafeIo: true, tmpfs: false, aptCache: true };
 
 /** Roles' stock dpkg options — the production-safe default. */
 export const STOCK_DPKG_OPTIONS = 'force-confdef,force-confold';
@@ -36,6 +38,7 @@ export function dpkgOptionArgs(dpkgOptions: string): string[] {
 export function parsePerfFlags(argv: readonly string[], defaults: PerfFlags, usage: string): PerfFlags {
   let unsafeIo = defaults.unsafeIo;
   let tmpfs = defaults.tmpfs;
+  let aptCache = defaults.aptCache;
   for (const arg of argv) {
     if (arg === '--unsafe-io') {
       unsafeIo = true;
@@ -45,6 +48,10 @@ export function parsePerfFlags(argv: readonly string[], defaults: PerfFlags, usa
       tmpfs = true;
     } else if (arg === '--no-tmpfs') {
       tmpfs = false;
+    } else if (arg === '--apt-cache') {
+      aptCache = true;
+    } else if (arg === '--no-apt-cache') {
+      aptCache = false;
     } else if (arg === '--help' || arg === '-h') {
       logger.log(usage);
       process.exit(0);
@@ -54,5 +61,5 @@ export function parsePerfFlags(argv: readonly string[], defaults: PerfFlags, usa
       process.exit(2);
     }
   }
-  return { unsafeIo, tmpfs };
+  return { unsafeIo, tmpfs, aptCache };
 }

@@ -11,7 +11,8 @@
     "bench:apt": "node scripts/bench-apt.ts",
     "test:http": "node scripts/test-http-run.ts",
     "check:ts": "tsc --noEmit",
-    "ensure:lxd": "node scripts/ensure-lxd.ts"
+    "ensure:lxd": "node scripts/ensure-lxd.ts",
+    "ensure:apt-cache": "node scripts/ensure-apt-cache.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

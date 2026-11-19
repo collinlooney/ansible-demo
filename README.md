@@ -16,9 +16,25 @@ sudo apt-get update
 sudo apt-get install -y ansible ansible-lint yamllint
 npm ci
 npm run ensure:lxd
+npm run ensure:apt-cache   # optional: local apt cache for fast, deterministic runs
 ```
 
 `npm run ensure:lxd` initializes/checks LXD. CI runs `lxd init --minimal` itself.
+
+`npm run ensure:apt-cache` installs and configures **apt-cacher-ng** on the
+workstation (bound to the LXD bridge only). It is optional: `inttest` and
+`bench:apt` probe for it and use it automatically when present, falling back
+to direct mirror fetches when absent (so CI is unchanged). The first run
+fills the cache; runs after that serve debs from local disk and survive
+flaky/dead Ubuntu mirrors (apt-cacher-ng fails over down your mirror list).
+
+**Configure your nearest mirror** (mirror choice is location-dependent, so
+it is local config, never committed): create `.apt-cache-mirrors` in the
+repo root — one `host/path` entry per line, order = preference — or set
+`APT_CACHE_MIRRORS="host/path ..."` (takes precedence; empty disables). The
+proxy then fetches each file exactly once from the first healthy entry and
+serves every later run from disk: one polite upstream relationship instead
+of repeated direct fetches, and the cache is never flushed on purpose.
 
 ## Run
 
@@ -64,6 +80,7 @@ Without act, `npm run inttest` runs the same steps the integration job runs.
 - `inttest` and `bench:apt` take throwaway-target speed flags (see `--help`):
   - `--unsafe-io` / `--no-unsafe-io` — pass dpkg `--force-unsafe-io` during apt installs. **Default on for these scripts only**; the roles' `apt_dpkg_options` default stays stock, so `inttest:self` and production deploys always get fsync-safe installs.
   - `--tmpfs` / `--no-tmpfs` — back the container's whole rootfs with a host-mounted tmpfs (dpkg/Liquibase/MySQL fsyncs become memory operations). Default off; needs RAM headroom (default cap = half of RAM, override with `LXC_TMPFS_SIZE=4G`).
+  - `--apt-cache` / `--no-apt-cache` — use the local apt cache from `npm run ensure:apt-cache` when one answers (default on; auto-fallback to direct mirror fetches when absent). Use `--no-apt-cache` to measure raw mirror behavior.
 - Measured end to end: baseline **11m34s** → default flags (`--unsafe-io`) **6m55s** → `npm run inttest -- --tmpfs` **1m20s** (see [`docs/perf.md`](docs/perf.md)).
 
 Measured findings and how to reproduce them: [`docs/perf.md`](docs/perf.md).

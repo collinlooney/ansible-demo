@@ -69,6 +69,40 @@ export function ensureTmpfsPool(): void {
   logger.log(`[lxd] storage pool '${TMPFS_POOL}' created on ${TMPFS_MOUNT_POINT}`);
 }
 
+/**
+ * lxdbr0's host-side IPv4 — the gateway containers use to reach the host —
+ * or null when LXD networking isn't initialized.
+ */
+export function getLxdBridgeIp(): string | null {
+  const res = execFileSync('lxc', ['network', 'get', 'lxdbr0', 'ipv4.address'], {});
+  if (res.status !== 0) {
+    return null;
+  }
+  const address = res.stdout.trim().split('/')[0] ?? '';
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(address) ? address : null;
+}
+
+/**
+ * Target-side apt configuration, written before Ansible runs so both
+ * `ansible.builtin.apt` and raw `apt-get` (bench) pick it up:
+ * always `Acquire::Retries` (absorbs flaky mirror connections), plus the
+ * local apt-cacher-ng proxy when one was probed. proxyUrl=null keeps the
+ * target fetching mirrors directly.
+ */
+export function configureTargetApt(name: string, proxyUrl: string | null): void {
+  const lines = ['Acquire::Retries "3";'];
+  if (proxyUrl != null) {
+    lines.push(`Acquire::http::Proxy "${proxyUrl}";`);
+  }
+  const result = execFileSync('lxc', ['exec', name, '--', 'sh', '-c', 'cat > /etc/apt/apt.conf.d/99acquire'], {
+    input: `${lines.join('\n')}\n`,
+    timeout: 60000,
+  });
+  if (result.status !== 0) {
+    throw new Error(`failed to write apt config in ${name}: ${result.stderr}`);
+  }
+}
+
 export interface LaunchOptions {
   /** Back the container's rootfs with tmpfs (see ensureTmpfsPool). */
   readonly tmpfs?: boolean;

@@ -6,6 +6,8 @@ app/node_modules/
 .vault_pass
 .env
 *.env.local
+# Local mirror preferences for npm run ensure:apt-cache (location-dependent)
+.apt-cache-mirrors
 __pycache__/
 .DS_Store
 Thumbs.db

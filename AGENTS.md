@@ -16,7 +16,7 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - Preserve `.run/<id>` on failure for diagnostics; clean on success.
 - Generated host entry point must use the discovered container IP, never hard-code IPs.
 - Scripts must remain erasable TypeScript: no enums, no parameter properties, `import type` where appropriate, no emit.
-- Speed optimizations are inttest-only opt-ins: roles' `apt_dpkg_options` defaults to stock dpkg behavior (fsync-safe), and only `scripts/inttest.ts`/`scripts/bench-apt.ts` pass `--force-unsafe-io` (flag `--unsafe-io`, default on) or use tmpfs-backed targets (flag `--tmpfs`, default off). `inttest:self` and production deploys never take these flags.
+- Speed optimizations are inttest-only opt-ins: roles' `apt_dpkg_options` defaults to stock dpkg behavior (fsync-safe), and only `scripts/inttest.ts`/`scripts/bench-apt.ts` pass `--force-unsafe-io` (flag `--unsafe-io`, default on) or use tmpfs-backed targets (flag `--tmpfs`, default off). `inttest:self` and production deploys never take these flags. The local apt cache (apt-cacher-ng) is likewise scripts-only: it is probed and injected into targets by the scripts (`--apt-cache`, default on with silent fallback), never configured by roles. Mirror preferences are local configuration (`.apt-cache-mirrors` / `APT_CACHE_MIRRORS`, both gitignored-or-env): never hardcode a mirror hostname in the repo — the fastest mirror depends on where the machine lives.
 
 ## Repo map
 
@@ -24,7 +24,9 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - `playbooks/site.yml`.
 - `roles/` (`mysql` + `keycloak` gated by `mysql_enabled`/`keycloak_enabled`).
 - `scripts/run.ts` subprocess helper.
-- `scripts/lxd.ts` container lifecycle.
+- `scripts/lxd.ts` container lifecycle + target-side apt config (proxy/retries injection).
+- `scripts/apt-cache.ts` local apt-cacher-ng probe (auto-detect; absent = direct mirrors).
+- `scripts/ensure-apt-cache.ts` host-side cache setup (`npm run ensure:apt-cache`, optional; preferred mirrors from local `.apt-cache-mirrors`/`APT_CACHE_MIRRORS` — never hardcoded in the repo).
 - `scripts/inttest.ts` one-click flow.
 - `scripts/target.ts` per-run state: `.run/<id>` dir, SSH key, inventory rendering.
 - `scripts/timing.ts` step timer; long-running scripts print a slowest-first breakdown.

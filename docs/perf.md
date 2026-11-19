@@ -15,6 +15,14 @@ host and `ubuntu:26.04` containers).
   | `--unsafe-io` (inttest default)        | 6m55.4s | 2m56.6s | 100.8s | 3m44.3s |
   | `--unsafe-io --tmpfs`                  | **1m19.7s** | **55.2s** | **16.0s** | **12.1s** |
 
+- **A local apt cache takes the network out of the run** (see
+  [Local apt cache](#local-apt-cache-apt-cacher-ng)): after
+  `npm run ensure:apt-cache` fills it — one polite upstream, chosen per
+  machine in local config — every later run serves all ~143 MB of debs and
+  indexes from local disk (verified: zero upstream connections during a warm
+  run) and fails over automatically if the mirror dies. Runs become
+  deterministic regardless of mirror weather, and no one gets hammered.
+
 - **`ansible.builtin.apt` is not slow.** Across all five apt tasks, Ansible's
   total overhead over raw `apt-get` on an identical fresh container was
   **0.345s** (SSH + module + python-apt, `pipelining = True`), re-measured at
@@ -40,16 +48,19 @@ host and `ubuntu:26.04` containers).
 ## How to reproduce
 
 ```bash
+npm run ensure:apt-cache           # optional: local apt cache (see Local apt cache)
 npm run inttest                    # per-phase breakdown + per-task Ansible profile
 npm run inttest -- --tmpfs         # fastest: tmpfs-backed container rootfs
 npm run inttest -- --no-unsafe-io  # stock dpkg fsync (the baseline above)
 npm run bench:apt                  # Ansible vs raw apt-get, twin fresh containers
 ```
 
-- `inttest` and `bench:apt` take `--unsafe-io/--no-unsafe-io` (default **on**)
-  and `--tmpfs/--no-tmpfs` (default **off**); `--help` prints usage. These
-  flags exist only on the throwaway-target scripts — `inttest:self` and
-  production deploys always use the roles' stock, fsync-safe default.
+- `inttest` and `bench:apt` take `--unsafe-io/--no-unsafe-io` (default **on**),
+  `--tmpfs/--no-tmpfs` (default **off**), and `--apt-cache/--no-apt-cache`
+  (default **on**, silent fallback when no cache answers); `--help` prints
+  usage. These flags exist only on the throwaway-target scripts —
+  `inttest:self` and production deploys always use the roles' stock,
+  fsync-safe default.
 - Every phase of `inttest`/`inttest:self` is timed; a slowest-first table with
   percentages is printed at the end of a run, pass or fail.
 - Every `ansible-playbook` run enables `ansible.posix.profile_tasks` +
@@ -204,8 +215,11 @@ cold-boot Liquibase slowness.
 ## Live-demo recommendations
 
 - **Fastest full demo: `npm run inttest -- --tmpfs`** — the whole suite
-  (deploy + HTTP + Keycloak credential assertions) finishes in **~1m20s**
-  and still ends with the phase breakdown and per-task profile.
+  (deploy + HTTP + Keycloak credential assertions) finishes in **~1m6s**
+  with a warm apt cache and still ends with the phase breakdown and
+  per-task profile. The cache is built by any earlier run (`ensure:apt-cache`
+  + first inttest); after that the demo needs no network at all, so it
+  cannot be derailed by mirror weather on stage.
 - Show `npm run inttest` with `INTTEST_ANSIBLE_LIVE=1`: Ansible's output
   streams as it runs, and the per-task profile recap lands at the end of the
   playbook — the "coffee timer" becomes a measured table.
@@ -236,6 +250,76 @@ cold-boot Liquibase slowness.
    unsafe-io, Keycloak cold boot 3m44s → 12s. Needs RAM headroom — like the
    dpkg flag, it is throwaway-target-only (`inttest:self`/production never
    take it).
+3. **Local apt cache** (applied 2026-11-19, default on with silent
+   fallback): `npm run ensure:apt-cache` installs apt-cacher-ng bound to the
+   LXD bridge, with mirror failover configured from **local** preferences
+   (`.apt-cache-mirrors` / `APT_CACHE_MIRRORS` — never hardcoded in the
+   repo; the fastest mirror is location-dependent). `inttest`/`bench:apt`
+   probe it after cloud-init and inject `Acquire::http::Proxy` +
+   `Acquire::Retries "3"` into the target. Measured below: warm runs serve
+   everything from disk with **zero upstream connections**. Full design,
+   measurements, and gotchas: [Local apt cache](#local-apt-cache-apt-cacher-ng).
+
+## Local apt cache (apt-cacher-ng)
+
+The last non-deterministic input was the network. Evidence collected before
+abandoning direct fetches entirely:
+
+- mirror speed variance: the same 32.7 MB measured **8.5 MB/s in one run and
+  1.06 MB/s in another**;
+- upstream flapping: `archive.ubuntu.com` fully dead (connect timeouts) while
+  `us.archive.ubuntu.com` answered, then both dead minutes later;
+- after repeated direct probes, Canonical throttled this host — a bare
+  `curl -v http://us.archive.ubuntu.com/ubuntu/` took **just over 30s wall
+  clock**. Direct-fetch benchmarking was dropped after that: unreliable *and*
+  impolite. The "before" numbers above all predate this policy.
+
+### Design
+
+- `npm run ensure:apt-cache` installs apt-cacher-ng and binds it to the LXD
+  bridge only (this build has no client ACLs — the listen address **is** the
+  access control; the LAN must never see an open caching proxy).
+- **Mirror choice is local config, never in the repo**: preferred mirrors
+  come from `.apt-cache-mirrors` (gitignored; one `host/path` entry per
+  line, order = preference) or `APT_CACHE_MIRRORS` (env; set-but-empty
+  disables). The fastest mirror depends on where the machine physically
+  lives, so it cannot be committed. With none configured, the drop-in
+  carries stock behavior only (passthrough to the requested host — still
+  cached).
+- Failover, strace-verified at IP level: repeated `Remap-` lines for a repo
+  merge their URL lists; targets are tried in order, the first success sticks,
+  timeouts fail over, and `keyfile=Release` makes a mirror serving
+  404-for-everything fail over too.
+  - **Gotcha**: referencing the stock **empty** `file:backends_ubuntu` in a
+    target list silently discards the *whole* list — targets revert to the
+    requested host with no failover. Raw URLs only.
+- `inttest`/`bench:apt` probe the proxy after cloud-init and inject
+  `Acquire::http::Proxy` + `Acquire::Retries "3"` into the target
+  (`--apt-cache`, default on; no cache answering → silent fallback, so CI
+  behaves exactly as before; `--no-apt-cache` for raw-mirror measurements).
+
+### Good-citizen policy
+
+- Every target fetch goes through the proxy: each file is downloaded **once**
+  from the first healthy mirror and shared by all later runs and containers.
+- The cache is **never flushed**; there are no more direct-fetch benchmarks.
+- Verified live: during the fill run the proxy held a single upstream
+  connection (matched by `ss` to the configured mirror's AAAA record); during
+  warm runs, **zero** upstream connections.
+
+### Measured (2026-11-19, default flags)
+
+| run                                            |  total   | playbook | npm task |
+| ---------------------------------------------- | -------: | -------: | -------: |
+| fill (cold cache — 143 MB fetched via proxy)   | 7m14.5s  | 3m16.2s  | 112.6s   |
+| warm (zero upstream bytes)                     | **6m42.7s** | 2m42.5s | 95.6s   |
+| warm + `--tmpfs`                               | **1m5.9s**  | 39.9s   | 5.7s    |
+
+The warm cache buys ~30s over the direct-fetch default-flag run (downloads
+were never the dominant cost — fsync was, already fixed by the flags) and
+~14s on top of the tmpfs configuration. Its real value is **determinism**:
+apt time becomes disk time, mirror weather stops mattering, and repeat runs
+stop touching the network at all.
 
 ## Remaining candidates
 
@@ -247,6 +331,13 @@ cold-boot Liquibase slowness.
 2. **No change to what gets installed**: package counts and
    `install_recommends` posture stay as-is unless the tech lead says
    otherwise.
+3. **Fastest-mirror probing (`probe:mirror`): rejected.** APT itself has no
+   fastest-mirror logic (direct Canonical A records, no CDN; unlike dnf's
+   `fastestmirror`), rankings churn run-to-run (8.5 vs 1.06 MB/s same file),
+   Canonical's `mirrors.ubuntu.com` discovery endpoint timed out from this
+   host, and with a warm local cache upstream speed is irrelevant after the
+   first fill. The durable answer is one-time local mirror choice per
+   machine (`.apt-cache-mirrors`), not per-run probing.
 
 ## Running the workflow locally with act
 

@@ -6,8 +6,10 @@ import {
   publishPublicKey,
   getContainerIpv4,
   waitForSsh,
+  configureTargetApt,
   destroyContainer,
 } from './lxd.ts';
+import { probeAptCache } from './apt-cache.ts';
 import { createRunState, renderInventory, generateSshKey } from './target.ts';
 import { runAnsiblePlaybook, printProfileRecap, parseTaskTimes, getTaskTime } from './ansible.ts';
 import {
@@ -43,6 +45,8 @@ const FLAG_USAGE = [
   'Throwaway-target optimizations (mirrored on both sides of the comparison):',
   '  --unsafe-io / --no-unsafe-io  dpkg --force-unsafe-io during apt installs (default: on)',
   '  --tmpfs / --no-tmpfs          back the containers rootfs with tmpfs (default: off)',
+  '  --apt-cache / --no-apt-cache  use the local apt cache if one answers (default: on;',
+  '                                use --no-apt-cache to measure raw mirror behavior)',
   '  --help',
 ].join('\n');
 interface AptOp {
@@ -181,6 +185,13 @@ async function main(): Promise<void> {
 
     await timer.run('ensure LXD', () => ensureLxd());
 
+    const aptCacheUrl = flags.aptCache
+      ? await timer.run('probe apt cache', () => probeAptCache())
+      : null;
+    logger.log(
+      `[bench] apt cache: ${aptCacheUrl ?? (flags.aptCache ? 'unavailable, mirrors direct' : 'disabled by flag')}`,
+    );
+
     const manualTimes = new Map<string, ManualResult>();
 
     await timer.run(`launch manual container ${manualName}`, () => {
@@ -188,6 +199,7 @@ async function main(): Promise<void> {
     });
     manualCreated = true;
     await timer.run('wait for cloud-init (manual)', () => waitForCloudInit(manualName));
+    await timer.run('configure target apt (manual)', () => configureTargetApt(manualName, aptCacheUrl));
 
     logger.log('[bench] phase 1/2: raw apt-get via lxc exec');
     for (const op of aptOps) {
@@ -201,6 +213,7 @@ async function main(): Promise<void> {
     });
     ansibleCreated = true;
     await timer.run('wait for cloud-init (ansible)', () => waitForCloudInit(ansibleName));
+    await timer.run('configure target apt (ansible)', () => configureTargetApt(ansibleName, aptCacheUrl));
     await timer.run('publish SSH key', () => publishPublicKey(ansibleName, publicKey));
     const ip = await timer.run('discover container IP', () => getContainerIpv4(ansibleName));
     await timer.run('wait for SSH', () => waitForSsh(ip, state.keyPath));

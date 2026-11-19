@@ -7,8 +7,10 @@ import {
   getContainerIpv4,
   waitForSsh,
   readContainerLogs,
+  configureTargetApt,
   destroyContainer,
 } from './lxd.ts';
+import { probeAptCache } from './apt-cache.ts';
 import { createRunState, renderInventory, generateSshKey, type RunState } from './target.ts';
 import { runAnsiblePlaybook, printProfileRecap } from './ansible.ts';
 import { createStepTimer } from './timing.ts';
@@ -27,6 +29,8 @@ const FLAG_USAGE = [
   'Throwaway-target optimizations (never used by self.ts / production):',
   '  --unsafe-io / --no-unsafe-io  dpkg --force-unsafe-io during apt installs (default: on)',
   '  --tmpfs / --no-tmpfs          back the container rootfs with tmpfs (default: off)',
+  '  --apt-cache / --no-apt-cache  use the local apt cache if one answers (default: on;',
+  '                                falls back to direct mirror fetches when absent)',
   '  --help',
 ].join('\n');
 
@@ -142,6 +146,13 @@ async function main(): Promise<void> {
 
     await timer.run('ensure LXD', () => ensureLxd());
 
+    const aptCacheUrl = flags.aptCache
+      ? await timer.run('probe apt cache', () => probeAptCache())
+      : null;
+    logger.log(
+      `[inttest] apt cache: ${aptCacheUrl ?? (flags.aptCache ? 'unavailable, mirrors direct' : 'disabled by flag')}`,
+    );
+
     const publicKey = await timer.run('generate SSH key', () => generateSshKey(state));
 
     await timer.run(`launch container ${state.containerName}`, () => {
@@ -150,6 +161,8 @@ async function main(): Promise<void> {
     created = true;
 
     await timer.run('wait for cloud-init', () => waitForCloudInit(state.containerName));
+
+    await timer.run('configure target apt', () => configureTargetApt(state.containerName, aptCacheUrl));
 
     await timer.run('publish SSH key', () => publishPublicKey(state.containerName, publicKey));
 
