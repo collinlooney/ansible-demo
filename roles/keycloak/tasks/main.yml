@@ -5,6 +5,7 @@
     state: present
   environment:
     DEBIAN_FRONTEND: noninteractive
+  tags: [apt]
 
 - name: Ensure Keycloak group exists
   ansible.builtin.group:

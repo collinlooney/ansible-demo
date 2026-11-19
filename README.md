@@ -28,6 +28,21 @@ npm run inttest
 npm run inttest:self         # deploy on the current host (Linux only)
 ```
 
+## Running the CI workflow locally with act
+
+`.actrc` maps `ubuntu-latest` to act's `-self-hosted` platform: the workflow
+provisions LXD, which needs systemd, so job steps must run directly on the host
+instead of act's default Docker containers.
+
+```bash
+act --trust-project-actrc -W .github/workflows/integration.yml -j lint
+act --trust-project-actrc -W .github/workflows/integration.yml -j integration
+```
+
+`--trust-project-actrc` is required: act only loads "safe" flags from a
+project-level `.actrc` by default, and `-self-hosted` reaches host resources.
+Without act, `npm run inttest` runs the same steps the integration job runs.
+
 ## What the test does
 
 1. Launch an Ubuntu 26.04 LXC container.
@@ -39,6 +54,15 @@ npm run inttest:self         # deploy on the current host (Linux only)
 ## Config knobs
 
 `roles/node_express_app/templates/app.env.j2` renders `PORT`, `APP_NAME`, `LOG_LEVEL`, and `NODE_ENV`.
+
+## Performance instrumentation
+
+- Every `inttest`/`inttest:self` run times each phase and prints a slowest-first breakdown (pass or fail) as its final output.
+- Every `ansible-playbook` invocation enables `ansible.posix.profile_tasks` + `ansible.posix.profile_roles`, so runs end with a per-task/per-role timing table. On failure the full playbook output is retained at `.run/<id>/ansible.log`.
+- `INTTEST_ANSIBLE_LIVE=1 npm run inttest` streams Ansible output as it runs (demo mode) instead of capturing it.
+- `npm run bench:apt` benchmarks the roles' `apt`-tagged tasks against the equivalent raw `apt-get` commands on a second, identical fresh container and prints a side-by-side comparison.
+
+Measured findings and how to reproduce them: [`docs/perf.md`](docs/perf.md).
 
 ## Notes
 

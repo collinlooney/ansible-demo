@@ -25,6 +25,10 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - `scripts/run.ts` subprocess helper.
 - `scripts/lxd.ts` container lifecycle.
 - `scripts/inttest.ts` one-click flow.
+- `scripts/target.ts` per-run state: `.run/<id>` dir, SSH key, inventory rendering.
+- `scripts/timing.ts` step timer; long-running scripts print a slowest-first breakdown.
+- `scripts/ansible.ts` profiled `ansible-playbook` invocation (profile_tasks/profile_roles) + recap parsing.
+- `scripts/bench-apt.ts` apt benchmark: roles' `apt`-tagged tasks vs raw apt-get (`npm run bench:apt`).
 - `scripts/test-http.ts` HTTP assertions using `APP_URL`.
 - `scripts/test-credentials.ts` Keycloak login assertions (seed -> import -> login).
 - `scripts/seed-test-db.ts` writes dump-shaped fixtures; `scripts/import-users.ts` imports them into Keycloak.
@@ -44,6 +48,8 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
 - Imported passwords are bcrypt (`$2a/$2b/$2y`, 60-char) via `leroyguillaume/keycloak-bcrypt`; Keycloak's default algorithm stays Argon2 and rehashes imported credentials on first login. Legacy hex+salt rows import disabled with no credential.
 - Busy-loop waits are used for simplicity in TypeScript; keep them short.
 - LXD container image download can be the dominant cold-start cost.
+- All Ansible runs are profiled via `ansible.posix.profile_tasks`/`profile_roles` (bundled with the `ansible` package installed in CI). The five apt tasks in the roles carry `tags: [apt]` so `scripts/bench-apt.ts` can benchmark exactly those task bodies — keep them tagged.
+- `docs/perf.md` records measured timings; refresh it when deploy logic changes materially affect them.
 
 ## Typical agent workflows
 

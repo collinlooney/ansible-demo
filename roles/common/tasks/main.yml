@@ -5,6 +5,7 @@
     cache_valid_time: 3600
   environment:
     DEBIAN_FRONTEND: noninteractive
+  tags: [apt]
 
 - name: Install base packages
   ansible.builtin.apt:
@@ -14,6 +15,7 @@
     state: present
   environment:
     DEBIAN_FRONTEND: noninteractive
+  tags: [apt]
 
 - name: Ensure application group exists
   ansible.builtin.group:

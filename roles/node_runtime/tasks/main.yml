@@ -8,6 +8,7 @@
     install_recommends: false
   environment:
     DEBIAN_FRONTEND: noninteractive
+  tags: [apt]
 
 - name: Verify Node.js version
   ansible.builtin.command: node --version

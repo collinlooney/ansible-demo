@@ -9,6 +9,9 @@ import {
   readContainerLogs,
   destroyContainer,
 } from './lxd.ts';
+import { createRunState, renderInventory, generateSshKey, type RunState } from './target.ts';
+import { runAnsiblePlaybook, printProfileRecap } from './ansible.ts';
+import { createStepTimer } from './timing.ts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as net from 'node:net';
@@ -16,35 +19,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { logger } from './logger.ts';
 import { TEST_USERS } from './test-users.ts';
-
-interface RunState {
-  readonly id: string;
-  readonly containerName: string;
-  readonly runDir: string;
-  readonly keyPath: string;
-  readonly inventoryPath: string;
-}
-
-function makeRunState(): RunState {
-  const id = `${Date.now().toString(36)}-${process.pid}`;
-  const runDir = path.join(process.cwd(), '.run', id);
-  const keyPath = path.join(runDir, 'id_ed25519');
-  const containerName = `node-express-inttest-${id.replace(/\./g, '-')}`.toLowerCase();
-  return {
-    id,
-    containerName,
-    runDir,
-    keyPath,
-    inventoryPath: path.join(runDir, 'hosts.ini'),
-  };
-}
-
-function renderInventory(ip: string, state: RunState): string {
-  const commonArgs = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null';
-  return `[lxc]
-${ip} ansible_host=${ip} ansible_port=22 ansible_user=ubuntu ansible_ssh_private_key_file=${state.keyPath} ansible_ssh_common_args="${commonArgs}"
-`;
-}
 
 function readEnv(name: string, defaultValue: string): string {
   const value = process.env[name];
@@ -144,40 +118,37 @@ async function openMysqlTunnel(state: RunState, ip: string): Promise<{
 }
 
 async function main(): Promise<void> {
-  const state = makeRunState();
+  const state = createRunState('node-express-inttest');
   fs.mkdirSync(state.runDir, { recursive: true });
+  const timer = createStepTimer('inttest');
 
   let created = false;
   let failed = false;
 
   try {
     logger.log(`[inttest] run id ${state.id}`);
-    logger.log('[inttest] ensuring LXD...');
-    ensureLxd();
 
-    logger.log('[inttest] generating SSH key...');
-    execOrThrow('ssh-keygen', ['-t', 'ed25519', '-N', '', '-f', state.keyPath, '-q']);
-    const publicKey = fs.readFileSync(`${state.keyPath}.pub`, 'utf8').trim();
+    await timer.run('ensure LXD', () => ensureLxd());
 
-    logger.log(`[inttest] launching container ${state.containerName}`);
-    launchContainer(state.containerName);
+    const publicKey = await timer.run('generate SSH key', () => generateSshKey(state));
+
+    await timer.run(`launch container ${state.containerName}`, () => {
+      launchContainer(state.containerName);
+    });
     created = true;
 
-    logger.log('[inttest] waiting for cloud-init...');
-    waitForCloudInit(state.containerName);
+    await timer.run('wait for cloud-init', () => waitForCloudInit(state.containerName));
 
-    logger.log('[inttest] publishing SSH key...');
-    publishPublicKey(state.containerName, publicKey);
+    await timer.run('publish SSH key', () => publishPublicKey(state.containerName, publicKey));
 
-    logger.log('[inttest] discovering container IP...');
-    const ip = getContainerIpv4(state.containerName);
+    const ip = await timer.run('discover container IP', () => getContainerIpv4(state.containerName));
     logger.log(`[inttest] container IP ${ip}`);
 
-    logger.log('[inttest] waiting for SSH...');
-    waitForSsh(ip, state.keyPath);
+    await timer.run('wait for SSH', () => waitForSsh(ip, state.keyPath));
 
-    logger.log('[inttest] rendering inventory...');
-    fs.writeFileSync(state.inventoryPath, renderInventory(ip, state));
+    await timer.run('render inventory', () => {
+      fs.writeFileSync(state.inventoryPath, renderInventory(ip, state));
+    });
 
     const idpEnabled = readEnv('INTTEST_IDP', '1') !== '0';
 
@@ -235,89 +206,94 @@ async function main(): Promise<void> {
 
     const extraVars = JSON.stringify(extraVarValues);
 
-    logger.log('[inttest] deploying with Ansible...');
-    execOrThrow('ansible-playbook', [
-      '-i', state.inventoryPath,
-      path.join(process.cwd(), 'playbooks', 'site.yml'),
-      '--extra-vars', extraVars,
-    ]);
+    // INTTEST_ANSIBLE_LIVE=1 streams Ansible's output as it runs (nice for
+    // demos); default captures it, keeps the full log on failure, and prints
+    // just the per-task profile recap on success.
+    const liveAnsible = readEnv('INTTEST_ANSIBLE_LIVE', '0') === '1';
+    await timer.run('ansible-playbook site.yml', () => {
+      const result = runAnsiblePlaybook({
+        inventoryPath: state.inventoryPath,
+        extraVars,
+        stream: liveAnsible,
+        logPath: liveAnsible ? undefined : path.join(state.runDir, 'ansible.log'),
+      });
+      if (!liveAnsible) {
+        printProfileRecap(result.stdout);
+      }
+    });
 
     const appUrl = `http://${ip}:3000`;
     logger.log(`[inttest] APP_URL=${appUrl}`);
 
-    logger.log('[inttest] running HTTP assertions...');
-    const testResult = execFileSync('node', [path.join(process.cwd(), 'scripts', 'test-http-run.ts')], {
-      env: { ...process.env, APP_URL: appUrl },
-      timeout: 300000,
+    await timer.run('HTTP assertions', () => {
+      const testResult = execFileSync('node', [path.join(process.cwd(), 'scripts', 'test-http-run.ts')], {
+        env: { ...process.env, APP_URL: appUrl },
+        timeout: 300000,
+      });
+      process.stdout.write(testResult.stdout);
+      process.stderr.write(testResult.stderr);
+      if (testResult.status !== 0) {
+        throw new Error('integration tests failed');
+      }
     });
-    process.stdout.write(testResult.stdout);
-    process.stderr.write(testResult.stderr);
-    if (testResult.status !== 0) {
-      throw new Error('integration tests failed');
-    }
 
     if (idpContext != null) {
+      const idp = idpContext;
       // Measured on the workstation repro (Keycloak 26.8.2, fresh schema):
       // cold first boot ~250s (Liquibase DDL dominates), warm restart ~10s.
       // 600s leaves headroom for slower server disks; warm boots, the only
       // case that is real downtime, never come close.
       const readyTimeoutMs = Number(readEnv('KEYCLOAK_READY_TIMEOUT_MS', '600000'));
 
-      logger.log('[inttest] waiting for Keycloak readiness (/health/ready)...');
-      await waitForKeycloakReady(`http://${ip}:9000/health/ready`, readyTimeoutMs);
+      await timer.run('wait for Keycloak readiness', () =>
+        waitForKeycloakReady(`http://${ip}:9000/health/ready`, readyTimeoutMs));
 
-      logger.log('[inttest] opening MySQL SSH tunnel...');
-      const tunnel = await openMysqlTunnel(state, ip);
+      const tunnel = await timer.run('open MySQL SSH tunnel', () => openMysqlTunnel(state, ip));
       try {
         const mysqlEnv = {
           MYSQL_HOST: '127.0.0.1',
           MYSQL_PORT: String(tunnel.localPort),
           MYSQL_USER: 'importer',
-          MYSQL_PASSWORD: idpContext.importerPassword,
+          MYSQL_PASSWORD: idp.importerPassword,
           MYSQL_DATABASE: 'dc',
         };
 
-        logger.log('[inttest] seeding test database...');
-        execOrThrow(
-          'node',
-          [path.join(process.cwd(), 'scripts', 'seed-test-db.ts')],
-          { env: { ...process.env, ...mysqlEnv, IMPORT_TEST_PASSWORDS: idpContext.testPasswordsJson } },
-        );
+        await timer.run('seed test database', () =>
+          execOrThrow('node', [path.join(process.cwd(), 'scripts', 'seed-test-db.ts')], {
+            env: { ...process.env, ...mysqlEnv, IMPORT_TEST_PASSWORDS: idp.testPasswordsJson },
+          }));
 
-        logger.log('[inttest] importing users into Keycloak...');
-        execOrThrow(
-          'node',
-          [path.join(process.cwd(), 'scripts', 'import-users.ts')],
-          {
+        await timer.run('import users into Keycloak', () =>
+          execOrThrow('node', [path.join(process.cwd(), 'scripts', 'import-users.ts')], {
             env: {
               ...process.env,
               ...mysqlEnv,
-              KC_URL: idpContext.keycloakUrl,
+              KC_URL: idp.keycloakUrl,
               KC_ADMIN_USERNAME: 'kcadmin',
-              KC_ADMIN_PASSWORD: idpContext.bootstrapPassword,
+              KC_ADMIN_PASSWORD: idp.bootstrapPassword,
             },
-          },
-        );
+          }));
 
-        logger.log('[inttest] running credential assertions...');
-        const credentialResult = execFileSync(
-          'node',
-          [path.join(process.cwd(), 'scripts', 'test-credentials-run.ts')],
-          {
-            env: {
-              ...process.env,
-              ...mysqlEnv,
-              KEYCLOAK_URL: idpContext.keycloakUrl,
-              IMPORT_TEST_PASSWORDS: idpContext.testPasswordsJson,
+        await timer.run('credential assertions', () => {
+          const credentialResult = execFileSync(
+            'node',
+            [path.join(process.cwd(), 'scripts', 'test-credentials-run.ts')],
+            {
+              env: {
+                ...process.env,
+                ...mysqlEnv,
+                KEYCLOAK_URL: idp.keycloakUrl,
+                IMPORT_TEST_PASSWORDS: idp.testPasswordsJson,
+              },
+              timeout: 300000,
             },
-            timeout: 300000,
-          },
-        );
-        process.stdout.write(credentialResult.stdout);
-        process.stderr.write(credentialResult.stderr);
-        if (credentialResult.status !== 0) {
-          throw new Error('credential tests failed');
-        }
+          );
+          process.stdout.write(credentialResult.stdout);
+          process.stderr.write(credentialResult.stderr);
+          if (credentialResult.status !== 0) {
+            throw new Error('credential tests failed');
+          }
+        });
       } finally {
         tunnel.process.kill();
       }
@@ -342,14 +318,15 @@ async function main(): Promise<void> {
   } finally {
     if (created) {
       try {
-        logger.log('[inttest] destroying container...');
-        destroyContainer(state.containerName);
+        await timer.run('destroy container', () => destroyContainer(state.containerName));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error(`[inttest] destroy failed: ${message}`);
         process.exitCode = 1;
       }
     }
+    // Printed last so the breakdown is the final frame of a run, pass or fail.
+    logger.log(timer.report());
     if (!failed) {
       fs.rmSync(state.runDir, { recursive: true, force: true });
     } else {

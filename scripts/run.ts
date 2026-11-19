@@ -12,6 +12,8 @@ export interface ExecOptions {
   readonly timeout?: number;
   readonly cwd?: string;
   readonly shell?: boolean;
+  /** Stream the child's stdio straight to this process instead of capturing it. */
+  readonly stream?: boolean;
 }
 
 export function execFileSync(
@@ -21,7 +23,7 @@ export function execFileSync(
 ): ExecResult {
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: options.stream ? 'inherit' : ['pipe', 'pipe', 'pipe'],
     cwd: options.cwd,
     env: options.env ?? process.env,
     timeout: options.timeout,

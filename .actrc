@@ -1,0 +1,11 @@
+# nektos/act configuration for this repo.
+#
+# The integration workflow provisions LXD, which needs systemd, so it cannot
+# run inside act's default Docker containers. Map ubuntu-latest to act's
+# "-self-hosted" platform: job steps then run directly on this host, where
+# LXD (and everything else the workflow needs) already lives.
+#
+# act treats a project-level .actrc as untrusted and skips flags that reach
+# host resources (like -self-hosted); run act with --trust-project-actrc to
+# apply this mapping. See README "Running the CI workflow locally with act".
+-P ubuntu-latest=-self-hosted

@@ -8,6 +8,7 @@
     "app:start": "node app/server.js",
     "inttest": "node scripts/inttest.ts",
     "inttest:self": "node scripts/self.ts",
+    "bench:apt": "node scripts/bench-apt.ts",
     "test:http": "node scripts/test-http-run.ts",
     "check:ts": "tsc --noEmit",
     "ensure:lxd": "node scripts/ensure-lxd.ts"
