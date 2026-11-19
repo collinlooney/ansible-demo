@@ -86,23 +86,35 @@ Note: `tojson` includes quotes, so it replaces `"{{ x }}"` with
 **File:** `roles/mysql/templates/zz-ansible.cnf.j2`
 
 MySQL option file format (see
-https://dev.mysql.com/doc/refman/9.7/en/option-files.html):
+https://dev.mysql.com/doc/refman/8.0/en/option-files.html):
 - Within `[section]` groups, `KEY = value`.
-- Values containing `#`, `;`, `"`, `'`, or whitespace should be quoted.
-- Inside double-quoted values, `"` must be `\"` and `\` must be `\\`.
-- Inside single-quoted values, `'` must be `''`.
-- Unquoted values cannot contain whitespace.
+- Values containing `#`, `;`, `"`, `'`, or whitespace should be quoted
+  (a `#` comment can start in the middle of an unquoted line).
+- Inside double-quoted values: `\"` escapes a double quote, `\\` escapes a
+  backslash, `\n`, `\r`, `\t`, `\b`, `\s` are recognized escape sequences.
+- Leading and trailing spaces are stripped from values.
 
-**Fix:** Apply `systemd_env_escape`-style escaping (backslash-escape `"`
-`$` `\`) and double-quote:
+**Fix:** Use the `mysql_option_escape` filter (in `filter_plugins/mysql.py`).
+It returns the value unquoted when it contains no special characters; otherwise
+returns a double-quoted, escaped string:
 
 ```jinja2
-bind-address = "{{ mysql_bind_address | systemd_env_escape }}"
-port = "{{ mysql_port | systemd_env_escape }}"
+bind-address = {{ mysql_bind_address | mysql_option_escape }}
+port = {{ mysql_port | mysql_option_escape }}
 ```
 
-(Or omit quotes when the value is known-safe, e.g. a plain IPv4 or integer
-port, but escaping+quoting is always safe.)
+Do **not** use `systemd_env_escape` for MySQL option files — it does not
+escape `#`, `;`, or `'`, all of which are significant in MySQL option syntax.
+
+### On newlines
+
+MySQL option files treat newlines as line separators, so a newline inside a
+value would break parsing. However, the values interpolated into
+`zz-ansible.cnf.j2` are known-safe (IPv4 addresses, integer ports, boolean
+keywords like `ON`) and come from role defaults — no user input, no shell
+injection vector. Escaping newlines is handled by the filter anyway
+(`\n`), but the practical risk is negligible since these values are fixed
+in defaults and never come from untrusted input.
 
 ## Templates audited
 
@@ -113,13 +125,13 @@ port, but escaping+quoting is always safe.)
 | `node-express.service.j2` | systemd unit | `systemd_env_escape` for scalars, `systemd_exec_escape` for `ExecStart` list |
 | `keycloak.service.j2` | systemd unit | `systemd_env_escape` for scalars, `systemd_exec_escape` for `ExecStart` list |
 | `realm.json.j2` | JSON | `tojson` |
-| `zz-ansible.cnf.j2` | MySQL option file | `systemd_env_escape` + quotes |
+| `zz-ansible.cnf.j2` | MySQL option file | `mysql_option_escape` |
 
 ## Implementation plan
 
 1. Create `filter_plugins/systemd.py` with `systemd_env_escape` and
    `systemd_exec_escape` filters.
-2. Register the filter plugin directory in `ansible.cfg` (or set
-   `ANSIBLE_FILTER_PLUGINS`).
-3. Update each template to apply the correct filter and quoting.
-4. Verify with `ansible-playbook --syntax-check` and a full inttest run.
+2. Create `filter_plugins/mysql.py` with `mysql_option_escape` filter.
+3. Register the filter plugin directory in `ansible.cfg` (`filter_plugins = filter_plugins`).
+4. Update each template to apply the correct filter and quoting.
+5. Verify with `ansible-playbook --syntax-check` and a full inttest run.
