@@ -1,13 +1,26 @@
-// Seeds the integration-test MySQL schema with rows shaped like the production
-// dump (same tables/columns) so import-users.ts exercises the real import path.
+// Seeds a MySQL database with a schema shaped like the production dump
+// (~/backups/mysql-all-20261027-121001.sql.gz) and populates it with test
+// users. Can be used programmatically (from inttest) or via the CLI wrapper
+// at scripts/seed-test-db.ts.
 //
-// Env: MYSQL_HOST/PORT/USER/PASSWORD/DATABASE, IMPORT_TEST_PASSWORDS (JSON
-// email -> plaintext password; only for fixtures that need one).
+// Programmatic use:
+//   import { seedTestDb } from './scripts/lib/seed-test-db';
+//   const result = await seedTestDb(makeMysqlConfig({ password: '...' }), {
+//     count: 20,
+//     extraUsers: [{ email: 'nnescio@example.com', firstName: 'nnescio', lastName: 'user', password: 'pass', adminRole: 2 }],
+//     passwords: { 'nnescio@example.com': 'pass' },
+//   });
+//
+// CLI use:
+//   node scripts/seed-test-db.ts --count 20 --extra-users extra-users.json
+//
+// Env (CLI only): MYSQL_HOST/PORT/USER/PASSWORD/DATABASE
+
+import { z } from 'zod';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import { logger } from './logger.ts';
-import { readMysqlConfig } from './mysql-config.ts';
-import { TEST_ADMIN_ROLES, TEST_USERS } from './test-users.ts';
+import { makeMysqlConfig, type MysqlConfig } from './mysql-config.ts';
 
 // Verbatim CREATE TABLE statements from the authorized production dump
 // (~/backups/mysql-all-20261027-121001.sql.gz), so the importer runs against
@@ -78,15 +91,113 @@ const DDL_USERS = `CREATE TABLE \`users\` (
   KEY \`idx_users_last_login\` (\`last_login\`)
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1`;
 
+// Subset of the production `AdminRoles` table (verbatim rows).
+export const DEFAULT_ADMIN_ROLES: readonly AdminRoleSpec[] = [
+  { id: 2, name: 'Super Administrator', permissions: 'all' },
+  { id: 4, name: 'Customer Support', permissions: 'customerSupport' },
+  {
+    id: 22,
+    name: 'Student Administrator',
+    permissions: 'manageMediaSources,manageAutoDelete,manageApprovals,graphs,backendAnalyst,viewAuditLog,manageAdministrators,manageMediaTransfer,customerSupport',
+  },
+  { id: 23, name: 'IT Manager', permissions: 'backendAnalyst,graphs,customerSupport,viewAuditLog' },
+  { id: 24, name: 'Data Analyst', permissions: 'graphs,backendAnalyst' },
+];
+
+export interface AdminRoleSpec {
+  readonly id: number;
+  readonly name: string;
+  readonly permissions: string;
+}
+
+export interface ExtraUserSpec {
+  readonly email: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly password: string;
+  /** dc.Admins role id (FK to AdminRoles). */
+  readonly adminRole?: number;
+  /** Legacy dc.admins string role; seeded with the dead hex+salt format. */
+  readonly legacyRole?: 'SuperAdmin' | 'Admin';
+  /** Write a dc.users (customer) row. */
+  readonly customer?: boolean;
+  /** Write a dc.users row in addition to the dc.Admins row (email overlap). */
+  readonly alsoCustomer?: boolean;
+  /** dc.Admins.status = 'inactive' (imported disabled). */
+  readonly inactive?: boolean;
+  /** dc.users.blocked = 1 (imported disabled). */
+  readonly blocked?: boolean;
+  /** dc.users.isVerified = 0 (imported disabled). */
+  readonly unverified?: boolean;
+  /** mustChangePassword = 1 (imported with UPDATE_PASSWORD required action). */
+  readonly mustChange?: boolean;
+}
+
+export interface SeedTestDbOptions {
+  /** Number of generated regular users to create (default: 10). */
+  readonly count?: number;
+  /** Additional specific users to create (from --extra-users JSON file). */
+  readonly extraUsers?: readonly ExtraUserSpec[];
+  /** Plaintext passwords keyed by email, for users that need bcrypt hashing. */
+  readonly passwords?: Record<string, string>;
+}
+
+export interface SeedTestDbResult {
+  readonly adminRoles: number;
+  readonly usersCreated: number;
+  readonly bcryptHashed: number;
+}
+
+const ExtraUserSchema = z.object({
+  email: z.string().email(),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  password: z.string().min(1),
+  adminRole: z.number().int().optional(),
+  legacyRole: z.enum(['SuperAdmin', 'Admin']).optional(),
+  customer: z.boolean().optional(),
+  alsoCustomer: z.boolean().optional(),
+  inactive: z.boolean().optional(),
+  blocked: z.boolean().optional(),
+  unverified: z.boolean().optional(),
+  mustChange: z.boolean().optional(),
+});
+
+const SeedOptionsSchema = z.object({
+  count: z.number().int().min(0).max(10000).default(10),
+  extraUsers: z.array(ExtraUserSchema).default([]),
+});
+
+type ParsedSeedOptions = z.infer<typeof SeedOptionsSchema>;
+
 // Pre-bcrypt dead credential format: 64-byte hex digest + separate salt.
 const DEAD_HASH = '0'.repeat(64);
 const DEAD_SALT = '0'.repeat(16);
 
-async function main(): Promise<void> {
-  const config = readMysqlConfig();
-  const passwords = JSON.parse(
-    process.env.IMPORT_TEST_PASSWORDS ?? '{}',
-  ) as Record<string, string>;
+function generateRandomEmail(index: number): string {
+  return `testuser${index}@example.com`;
+}
+
+function generateRandomPassword(): string {
+  return Buffer.from(crypto.randomUUID() + Date.now().toString()).toString('base64url').slice(0, 24);
+}
+
+/**
+ * Seeds a MySQL database with the production-shaped schema and test users.
+ *
+ * Drops and recreates AdminRoles, Admins, admins (legacy), and users tables.
+ * Inserts the default admin roles, then creates `count` generated users plus
+ * any `extraUsers`. Users with passwords are bcrypt-hashed (cost 10); users
+ * without passwords get the dead hex+salt format.
+ *
+ * Returns a result summary with counts.
+ */
+export async function seedTestDb(
+  config: MysqlConfig,
+  options: SeedTestDbOptions = {},
+): Promise<SeedTestDbResult> {
+  const parsed = SeedOptionsSchema.parse(options);
+  const passwords = options.passwords ?? {};
 
   const connection = await mysql.createConnection({
     host: config.host,
@@ -97,7 +208,9 @@ async function main(): Promise<void> {
   });
 
   try {
-    // Admins has an FK to AdminRoles: drop children first.
+    // Disable foreign key checks so we can drop tables in any order
+    // (production dump does the same: FOREIGN_KEY_CHECKS=0).
+    await connection.query('SET FOREIGN_KEY_CHECKS=0');
     await connection.query('DROP TABLE IF EXISTS `Admins`');
     await connection.query('DROP TABLE IF EXISTS `admins`');
     await connection.query('DROP TABLE IF EXISTS `users`');
@@ -106,28 +219,47 @@ async function main(): Promise<void> {
     await connection.query(DDL_ADMINS);
     await connection.query(DDL_LEGACY_ADMINS);
     await connection.query(DDL_USERS);
+    await connection.query('SET FOREIGN_KEY_CHECKS=1');
 
-    for (const role of TEST_ADMIN_ROLES) {
-      await connection.query('INSERT INTO `AdminRoles` (`id`, `name`, `permissions`) VALUES (?, ?, ?)', [
-        role.id,
-        role.name,
-        role.permissions,
-      ]);
+    for (const role of DEFAULT_ADMIN_ROLES) {
+      await connection.query(
+        'INSERT INTO `AdminRoles` (`id`, `name`, `permissions`) VALUES (?, ?, ?)',
+        [role.id, role.name, role.permissions],
+      );
     }
 
     let hashed = 0;
-    for (const user of TEST_USERS) {
+    let usersCreated = 0;
+
+    // Generated regular users.
+    for (let i = 0; i < parsed.count; i += 1) {
+      const email = generateRandomEmail(i);
+      const plaintext = generateRandomPassword();
+      const hash = await bcrypt.hash(plaintext, 10);
+      passwords[email] = plaintext;
+      hashed += 1;
+      usersCreated += 1;
+
+      await connection.query(
+        'INSERT INTO `Admins` (`email`, `password`, `firstName`, `lastName`, `role`, `status`, `mustChangePassword`) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [email, hash, `TestUser${i}`, 'User', 2, 'active', 0],
+      );
+      await connection.query(
+        'INSERT INTO `users` (`email`, `firstName`, `lastName`, `password`, `salt`, `isVerified`, `blocked`, `mustChangePassword`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [email, `TestUser${i}`, 'User', hash, null, 1, 0, 0],
+      );
+    }
+
+    // Extra specific users.
+    for (const user of parsed.extraUsers) {
       let hash: string;
       if (user.password) {
-        const plaintext = passwords[user.email];
-        if (plaintext == null || plaintext === '') {
-          throw new Error(`IMPORT_TEST_PASSWORDS is missing a password for ${user.email}`);
-        }
-        hash = await bcrypt.hash(plaintext, 10);
+        hash = await bcrypt.hash(user.password, 10);
         hashed += 1;
       } else {
         hash = DEAD_HASH;
       }
+      usersCreated += 1;
 
       if (user.adminRole != null) {
         await connection.query(
@@ -168,14 +300,16 @@ async function main(): Promise<void> {
       }
     }
 
-    logger.log(`[seed] schema created; ${TEST_USERS.length} users, ${hashed} bcrypt-hashed`);
+    logger.log(
+      `[seed] schema created; ${usersCreated} users, ${hashed} bcrypt-hashed`,
+    );
+
+    return {
+      adminRoles: DEFAULT_ADMIN_ROLES.length,
+      usersCreated,
+      bcryptHashed: hashed,
+    };
   } finally {
     await connection.end();
   }
 }
-
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  logger.error(`[seed] FAILED: ${message}`);
-  process.exit(1);
-});

@@ -1,16 +1,27 @@
-// Imports existing logins from the production-shaped MySQL schema into
-// Keycloak. bcrypt hashes ($2a/$2b/$2y, 60-char) are copied verbatim through
-// the bcrypt SPI credential format — no preimage is ever computed. Legacy
-// hex+salt rows are imported disabled with no credential; recovery is
+// Imports existing logins from a production-shaped MySQL schema into a
+// Keycloak instance. bcrypt hashes ($2a/$2b/$2y, 60-char) are copied verbatim
+// through the bcrypt SPI credential format — no preimage is ever computed.
+// Legacy hex+salt rows are imported disabled with no credential; recovery is
 // Keycloak's own password reset email.
 //
-// Env: KC_URL, KC_REALM, KC_ADMIN_USERNAME/PASSWORD (see keycloak-admin.ts),
-// MYSQL_* (see mysql-config.ts). --dry-run prints the plan without importing.
+// Can be used programmatically (from inttest) or via the CLI wrapper at
+// scripts/import-users.ts.
+//
+// Programmatic use:
+//   import { importUsers } from './scripts/lib/import-users';
+//   const result = await importUsers(mysqlConfig, keycloakConfig, { dryRun: false });
+//
+// CLI use:
+//   node scripts/import-users.ts
+//
+// Env (CLI only): MYSQL_HOST/PORT/USER/PASSWORD/DATABASE,
+//   KC_URL, KC_REALM, KC_ADMIN_USERNAME, KC_ADMIN_PASSWORD
+
 import mysql from 'mysql2/promise';
 import type { RowDataPacket } from 'mysql2/promise';
 import { logger } from './logger.ts';
-import { readMysqlConfig } from './mysql-config.ts';
-import { KeycloakAdmin, readKeycloakAdminConfig } from './keycloak-admin.ts';
+import { makeMysqlConfig, type MysqlConfig } from './mysql-config.ts';
+import { KeycloakAdmin, type KeycloakAdminConfig, readKeycloakAdminConfig } from './keycloak-admin.ts';
 
 // Importable iff the hash is a complete, standard bcrypt string. Anything else
 // (legacy 64-byte hex digest + separate salt, plaintext) is dead weight: we
@@ -76,6 +87,19 @@ interface ImportUser {
   requiredActions: Set<string>;
 }
 
+export interface ImportUsersOptions {
+  /** Print the import plan without writing to Keycloak (default: false). */
+  readonly dryRun?: boolean;
+}
+
+export interface ImportUsersResult {
+  readonly classified: number;
+  readonly withCredentials: number;
+  readonly disabled: number;
+  readonly created: number;
+  readonly updated: number;
+}
+
 function parseBcrypt(hash: string): ImportCredential | null {
   const match = BCRYPT_HASH.exec(hash);
   if (match == null) {
@@ -112,9 +136,20 @@ function ensureUser(map: Map<string, ImportUser>, email: string): ImportUser {
   return created;
 }
 
-async function main(): Promise<void> {
-  const dryRun = process.argv.includes('--dry-run');
-  const mysqlConfig = readMysqlConfig();
+/**
+ * Imports users from a MySQL database into a Keycloak instance.
+ *
+ * Reads AdminRoles, Admins, admins (legacy), and users tables from MySQL,
+ * classifies accounts, and creates/updates them in Keycloak via the Admin API.
+ *
+ * Returns a result summary with counts.
+ */
+export async function importUsers(
+  mysqlConfig: MysqlConfig,
+  keycloakConfig: KeycloakAdminConfig,
+  options: ImportUsersOptions = {},
+): Promise<ImportUsersResult> {
+  const dryRun = options.dryRun ?? false;
 
   const connection = await mysql.createConnection({
     host: mysqlConfig.host,
@@ -123,6 +158,12 @@ async function main(): Promise<void> {
     password: mysqlConfig.password,
     database: mysqlConfig.database,
   });
+
+  let classified = 0;
+  let withCredentials = 0;
+  let disabled = 0;
+  let created = 0;
+  let updated = 0;
 
   try {
     const [roleRows] = await connection.query<AdminRolesRow[]>(
@@ -185,10 +226,13 @@ async function main(): Promise<void> {
       }
     }
 
+    classified = usersByEmail.size;
+    withCredentials = [...usersByEmail.values()].filter((user) => user.credential != null).length;
+    disabled = [...usersByEmail.values()].filter((user) => !user.enabled).length;
+
     logger.log(
-      `[import] classified ${usersByEmail.size} accounts: ` +
-        `${[...usersByEmail.values()].filter((user) => user.credential != null).length} with bcrypt credentials, ` +
-        `${[...usersByEmail.values()].filter((user) => !user.enabled).length} disabled`,
+      `[import] classified ${classified} accounts: ` +
+        `${withCredentials} with bcrypt credentials, ${disabled} disabled`,
     );
 
     if (dryRun) {
@@ -199,13 +243,10 @@ async function main(): Promise<void> {
             `actions=[${[...user.requiredActions].join(',')}]`,
         );
       }
-      return;
+      return { classified, withCredentials, disabled, created: 0, updated: 0 };
     }
 
-    const keycloakConfig = readKeycloakAdminConfig();
     const admin = new KeycloakAdmin(keycloakConfig);
-    let created = 0;
-    let updated = 0;
     for (const user of usersByEmail.values()) {
       const credential = user.credential;
       const hasEmail = EMAIL_PATTERN.test(user.email);
@@ -250,14 +291,11 @@ async function main(): Promise<void> {
           `${credential == null ? ', no credential' : ', bcrypt credential'})`,
       );
     }
+
     logger.log(`[import] done: ${created} created, ${updated} updated`);
+
+    return { classified, withCredentials, disabled, created, updated };
   } finally {
     await connection.end();
   }
 }
-
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  logger.error(`[import] FAILED: ${message}`);
-  process.exit(1);
-});

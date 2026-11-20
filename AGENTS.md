@@ -35,10 +35,12 @@ LXC is the test-target simulator only. Ansible is the primary IaC layer. Deploym
   - `target.ts` per-run state: `.run/<id>` dir, SSH key, inventory rendering.
   - `timing.ts` step timer; owns the plain-mode `> step` / `< step (dur)` lines and the gated slowest-first breakdown (`--timing`).
   - `ansible.ts` profiled `ansible-playbook` invocation (profile_tasks/profile_roles) + recap parsing.
-  - `import-users.ts` imports seed fixtures into Keycloak.
-  - `seed-test-db.ts` writes dump-shaped fixtures into MySQL.
-  - `keycloak-admin.ts` minimal Admin API client; `mysql-config.ts` shared MySQL env config; `test-users.ts` shared user fixtures for the credential inttest; `logger.ts` timestamped logger.
-- `scripts/inttest.ts` one-click flow (top-level, entry point).
+  - `import-users.ts` imports seed fixtures into Keycloak (library; CLI wrapper at `scripts/import-users.ts`).
+  - `seed-test-db.ts` writes dump-shaped fixtures into MySQL (library; CLI wrapper at `scripts/seed-test-db.ts`).
+  - `keycloak-admin.ts` minimal Admin API client; `mysql-config.ts` shared MySQL env config (`readMysqlConfig` from env, `makeMysqlConfig` programmatic); `test-users.ts` shared user fixtures for the credential inttest; `logger.ts` timestamped logger.
+- `scripts/inttest.ts` one-click flow (top-level, entry point) — calls `seedTestDb`/`importUsers` directly in Node-land, no subprocesses.
+- `scripts/seed-test-db.ts` CLI wrapper for `seedTestDb` (`--count`, `--extra-users`).
+- `scripts/import-users.ts` CLI wrapper for `importUsers` (`--dry-run`).
 - `scripts/bench-apt.ts` apt benchmark: roles' `apt`-tagged tasks vs raw apt-get (`npm run bench:apt`) (top-level, entry point).
 - `scripts/self.ts` target-host deploy (Linux only) (top-level, entry point).
 - `scripts/ensure-lxd.ts` LXD setup (`npm run ensure:lxd`) (top-level, entry point).

@@ -1,4 +1,4 @@
-import { execFile, execFileOrThrow } from './lib/run.ts';
+import { execFile } from './lib/run.ts';
 import {
   ensureLxd,
   launchContainer,
@@ -15,6 +15,9 @@ import { createRunState, renderInventory, generateSshKey, type RunState } from '
 import { runAnsiblePlaybook, printProfileRecap } from './lib/ansible.ts';
 import { createStepTimer } from './lib/timing.ts';
 import { createUi } from './lib/ui.ts';
+import { seedTestDb } from './lib/seed-test-db.ts';
+import { importUsers } from './lib/import-users.ts';
+import { makeMysqlConfig } from './lib/mysql-config.ts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as net from 'node:net';
@@ -314,31 +317,28 @@ async function main(): Promise<void> {
 
       const tunnel = await timer.run('open MySQL SSH tunnel', () => openMysqlTunnel(state, ip));
       try {
-        const mysqlEnv = {
-          MYSQL_HOST: '127.0.0.1',
-          MYSQL_PORT: String(tunnel.localPort),
-          MYSQL_USER: 'importer',
-          MYSQL_PASSWORD: idp.importerPassword,
-          MYSQL_DATABASE: 'dc',
-        };
+        const mysqlConfig = makeMysqlConfig({
+          host: '127.0.0.1',
+          port: tunnel.localPort,
+          user: 'importer',
+          password: idp.importerPassword,
+          database: 'dc',
+        });
 
         await timer.run('seed test database', (ctx) =>
-          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'lib', 'seed-test-db.ts')], {
-            env: { ...process.env, ...mysqlEnv, IMPORT_TEST_PASSWORDS: idp.testPasswordsJson },
-            preview: ctx.preview,
-          }));
+          seedTestDb(mysqlConfig, {
+            passwords: JSON.parse(idp.testPasswordsJson),
+          }),
+        );
 
         await timer.run('import users into Keycloak', (ctx) =>
-          execFileOrThrow('node', [path.join(process.cwd(), 'scripts', 'lib', 'import-users.ts')], {
-            env: {
-              ...process.env,
-              ...mysqlEnv,
-              KC_URL: idp.keycloakUrl,
-              KC_ADMIN_USERNAME: 'kcadmin',
-              KC_ADMIN_PASSWORD: idp.bootstrapPassword,
-            },
-            preview: ctx.preview,
-          }));
+          importUsers(mysqlConfig, {
+            baseUrl: idp.keycloakUrl,
+            realm: 'digiclips',
+            username: 'kcadmin',
+            password: idp.bootstrapPassword,
+          }),
+        );
 
         await timer.run('credential assertions', async (ctx) => {
           const credentialResult = await execFile(
@@ -347,7 +347,11 @@ async function main(): Promise<void> {
             {
               env: {
                 ...process.env,
-                ...mysqlEnv,
+                MYSQL_HOST: '127.0.0.1',
+                MYSQL_PORT: String(tunnel.localPort),
+                MYSQL_USER: 'importer',
+                MYSQL_PASSWORD: idp.importerPassword,
+                MYSQL_DATABASE: 'dc',
                 KEYCLOAK_URL: idp.keycloakUrl,
                 IMPORT_TEST_PASSWORDS: idp.testPasswordsJson,
               },
